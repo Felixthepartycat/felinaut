@@ -13,8 +13,19 @@ wry = { version = "=0.57.1", default-features = false, features = [
 url = "2.5"
 unicode-segmentation = "1.12"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Already used by Wry; read the live native Reduce Motion setting without polling a subprocess.
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSWorkspace",
+    "NSAccessibility",
+] }
+
 [[test]]
 name = "native_webview"
+harness = false
+
+[[test]]
+name = "brand_ui"
 harness = false
 
 [profile.dev]

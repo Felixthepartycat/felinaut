@@ -1577,6 +1577,7 @@ name = "felifox"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "objc2-app-kit",
  "unicode-segmentation",
  "url",
  "wry",

@@ -4,6 +4,7 @@
 
 use std::ops::Range;
 
+use crate::theme::{self, ThemeSettings};
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
@@ -66,6 +67,7 @@ pub struct AddressInput {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    _theme_observer: gpui::Subscription,
 }
 
 impl EventEmitter<Submit> for AddressInput {}
@@ -82,6 +84,7 @@ impl AddressInput {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            _theme_observer: cx.observe_global::<ThemeSettings>(|_, cx| cx.notify()),
         }
     }
 
@@ -516,9 +519,10 @@ impl Element for TextElement {
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let style = window.text_style();
+        let p = theme::palette(cx);
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), rgb(0x939bb9).into())
+            (input.placeholder.clone(), rgb(p.muted).into())
         } else {
             (content, style.color)
         };
@@ -572,7 +576,7 @@ impl Element for TextElement {
                         point(bounds.left() + cursor_pos, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
                     ),
-                    rgb(0xedf0ff),
+                    rgb(p.text),
                 )),
             )
         } else {
@@ -588,7 +592,7 @@ impl Element for TextElement {
                             bounds.bottom(),
                         ),
                     ),
-                    rgba(0x788cff60),
+                    rgba((p.secondary << 8) | 0x40),
                 )),
                 None,
             )
@@ -638,6 +642,7 @@ impl Element for TextElement {
 
 impl Render for AddressInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = theme::palette(cx);
         div()
             .flex()
             .key_context("AddressInput")
@@ -664,8 +669,10 @@ impl Render for AddressInput {
             .w_full()
             .min_w_0()
             .rounded_lg()
-            .bg(rgb(0x171b30))
-            .text_color(rgb(0xedf0ff))
+            .bg(rgb(p.input))
+            .text_color(rgb(p.text))
+            .border_1()
+            .border_color(rgb(p.border))
             .line_height(px(24.))
             .text_size(px(14.))
             .px_3()
