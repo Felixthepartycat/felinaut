@@ -41,6 +41,7 @@ struct Tab {
     home: bool,
     loading: bool,
     error: Option<String>,
+    hovered_link: Option<String>,
     page: Option<Rc<NativePage>>,
 }
 impl Tab {
@@ -52,6 +53,7 @@ impl Tab {
             home: true,
             loading: false,
             error: None,
+            hovered_link: None,
             page: None,
         }
     }
@@ -178,6 +180,7 @@ impl Browser {
                 changed = true;
                 match event {
                     Event::Started(url) => {
+                        tab.hovered_link = None;
                         tab.loading = true;
                         tab.error = None;
                         tab.url = url;
@@ -193,16 +196,17 @@ impl Browser {
                         tab.url = url;
                         address_changed |= index == self.active;
                     }
-                    Event::Open(url) => open.push(url),
+                    Event::Open(url) => open.push((url, true)),
+                    Event::OpenInBackground(url) => open.push((url, false)),
+                    Event::Hover(url) => tab.hovered_link = url,
                 }
             }
         }
         if address_changed && !self.address.read(cx).focus_handle(cx).is_focused(window) {
             self.sync_address(cx);
         }
-        for url in open {
-            self.new_tab(&NewTab, window, cx);
-            self.navigate(&url, window, cx);
+        for (url, activate) in open {
+            self.open_link_tab(&url, activate, window, cx);
         }
         if changed {
             cx.notify();
@@ -222,6 +226,7 @@ impl Browser {
             return;
         }
         let tab = &mut self.tabs[self.active];
+        tab.hovered_link = None;
         let result = if let Some(page) = &tab.page {
             page.navigate(&url)
         } else {
@@ -245,12 +250,46 @@ impl Browser {
         self.sync_address(cx);
         cx.notify();
     }
+    fn open_link_tab(
+        &mut self,
+        url: &str,
+        activate: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match NativePage::new(window, url) {
+            Ok(page) => {
+                let page = Rc::new(page);
+                let mut tab = Tab::new(self.next_id);
+                self.next_id += 1;
+                tab.url = url.into();
+                tab.home = false;
+                tab.loading = true;
+                tab.title = url::Url::parse(url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_owned))
+                    .unwrap_or_else(|| "Loading…".into());
+                tab.page = Some(page.clone());
+                self.tabs.push(tab);
+                if activate {
+                    self.select_tab(self.tabs.len() - 1, window, cx);
+                    window.on_next_frame(move |_, _| {
+                        let _ = page.focus();
+                    });
+                }
+            }
+            Err(error) => self.tabs[self.active].error = Some(error),
+        }
+        cx.notify();
+    }
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.tabs[self.active].hovered_link = None;
         if let Some(page) = &self.tabs[self.active].page {
             let _ = page.set_visible(false);
             let _ = page.focus_parent();
         }
         self.active = index;
+        self.tabs[index].hovered_link = None;
         window.focus(&self.focus);
         self.sync_address(cx);
         cx.notify();
@@ -337,6 +376,7 @@ impl Browser {
         }
         tab.home = true;
         tab.error = None;
+        tab.hovered_link = None;
         window.focus(&self.focus);
         self.sync_address(cx);
         cx.notify();
@@ -471,9 +511,28 @@ impl Browser {
                                         .items_center()
                                         .justify_center()
                                         .gap_2()
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.navigate(url, window, cx)
-                                        }))
+                                        .on_hover(cx.listener(
+                                            move |this, hovered: &bool, _, cx| {
+                                                this.tabs[this.active].hovered_link =
+                                                    hovered.then(|| url.to_owned());
+                                                cx.notify();
+                                            },
+                                        ))
+                                        .on_click(cx.listener(
+                                            move |this, event: &ClickEvent, window, cx| {
+                                                let modifiers = event.modifiers();
+                                                if modifiers.platform {
+                                                    this.open_link_tab(
+                                                        url,
+                                                        modifiers.shift,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                } else {
+                                                    this.navigate(url, window, cx);
+                                                }
+                                            },
+                                        ))
                                         .child(
                                             div()
                                                 .size(px(30.))
@@ -542,11 +601,15 @@ impl Render for Browser {
         let tab = &self.tabs[self.active];
         let back_enabled = tab.can_go_back();
         let forward_enabled = tab.can_go_forward();
-        let status = if tab.loading && !tab.home {
-            "Loading · WebKit"
-        } else {
-            "WebKit · JavaScript enabled"
-        };
+        let status = tab
+            .hovered_link
+            .as_deref()
+            .or(tab.error.as_deref())
+            .unwrap_or(if tab.loading && !tab.home {
+                "Loading · WebKit"
+            } else {
+                "WebKit · JavaScript enabled"
+            });
         div()
             .id("felifox")
             .track_focus(&self.focus)
@@ -696,8 +759,21 @@ impl Render for Browser {
                     .justify_between()
                     .text_xs()
                     .text_color(rgb(p.muted))
-                    .child(tab.error.as_deref().unwrap_or(status).to_owned())
-                    .child(format!("FELIFOX  /  {DISPLAY_VERSION}")),
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .child(status.to_owned()),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .child(format!("FELIFOX  /  {DISPLAY_VERSION}")),
+                    ),
             )
     }
 }

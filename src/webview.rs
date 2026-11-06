@@ -13,6 +13,8 @@ pub enum Event {
     Title(String),
     Url(String),
     Open(String),
+    OpenInBackground(String),
+    Hover(Option<String>),
 }
 
 /// One persistent native child view per tab; hiding it does not discard its history or document.
@@ -30,7 +32,14 @@ impl NativePage {
         let (sender, events) = mpsc::channel();
         let load_sender = sender.clone();
         let title_sender = sender.clone();
+        let link_sender = sender.clone();
         let webview = WebViewBuilder::new()
+            .with_initialization_script_for_main_only(include_str!("link_interactions.js"), false)
+            .with_ipc_handler(move |request| {
+                if let Some(event) = parse_link_event(request.body()) {
+                    let _ = link_sender.send(event);
+                }
+            })
             .with_visible(false)
             .with_focused(false)
             .with_navigation_handler(|url| allowed_url(&url))
@@ -62,6 +71,14 @@ impl NativePage {
             events,
             last_url: RefCell::new(String::new()),
         })
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code, reason = "Used by the opt-in native link interaction test")]
+    pub fn evaluate_for_test(&self, script: &str) -> Result<(), String> {
+        self.webview
+            .evaluate_script(script)
+            .map_err(|error| error.to_string())
     }
 
     pub fn navigate(&self, url: &str) -> Result<(), String> {
@@ -141,6 +158,31 @@ impl NativePage {
     }
 }
 
+/// The content bridge has no privileged commands: only link status and web-tab requests.
+fn parse_link_event(message: &str) -> Option<Event> {
+    if message.len() > 8_256 {
+        return None;
+    }
+    let (kind, value) = message.strip_prefix("felifox-link:")?.split_once(':')?;
+    if kind == "hover" && value.is_empty() {
+        return Some(Event::Hover(None));
+    }
+    if value.chars().any(char::is_control) {
+        return None;
+    }
+    let url = url::Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return None;
+    }
+    let url = url.to_string();
+    match kind {
+        "hover" => Some(Event::Hover(Some(url))),
+        "open" => Some(Event::Open(url)),
+        "background" => Some(Event::OpenInBackground(url)),
+        _ => None,
+    }
+}
+
 fn allowed_url(url: &str) -> bool {
     url.split_once(':').is_some_and(|(scheme, _)| {
         scheme.eq_ignore_ascii_case("http")
@@ -159,6 +201,39 @@ fn check_url(url: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn link_bridge_is_bounded_and_accepts_only_web_links() {
+        use super::{Event, parse_link_event};
+        assert_eq!(
+            parse_link_event("felifox-link:hover:https://example.com/a?q=1"),
+            Some(Event::Hover(Some("https://example.com/a?q=1".into())))
+        );
+        assert_eq!(
+            parse_link_event("felifox-link:hover:"),
+            Some(Event::Hover(None))
+        );
+        assert!(matches!(
+            parse_link_event("felifox-link:background:https://example.com"),
+            Some(Event::OpenInBackground(_))
+        ));
+        for message in [
+            "felifox-link:open:javascript:alert(1)",
+            "felifox-link:open:file:///etc/passwd",
+            "felifox-link:open:about:blank",
+            "felifox-link:delete:https://example.com",
+            "felifox-link:hover:https://example.com/\n",
+            "unknown",
+        ] {
+            assert_eq!(parse_link_event(message), None, "{message}");
+        }
+        assert_eq!(
+            parse_link_event(&format!(
+                "felifox-link:hover:https://example.com/{}",
+                "x".repeat(9000)
+            )),
+            None
+        );
+    }
 
     #[test]
     fn permits_only_web_and_about_schemes() {
