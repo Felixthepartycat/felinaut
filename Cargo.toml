@@ -1,0 +1,24 @@
+[package]
+name = "felifox"
+version = "0.1.0"
+edition = "2024"
+description = "A lightweight Rust browser with GPUI chrome and native WebKit pages"
+license = "MIT"
+
+[dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["font-kit"] }
+wry = { version = "=0.57.1", default-features = false, features = [
+    "os-webview",
+] }
+url = "2.5"
+unicode-segmentation = "1.12"
+
+[[test]]
+name = "native_webview"
+harness = false
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+lto = "thin"
