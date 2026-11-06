@@ -3,6 +3,7 @@
 import plistlib
 import struct
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -22,6 +23,17 @@ class PackagingTests(unittest.TestCase):
             info["NSAppTransportSecurity"]["NSAllowsArbitraryLoadsInWebContent"]
         )
         self.assertNotIn("NSAllowsArbitraryLoads", info["NSAppTransportSecurity"])
+
+    def test_dist_command_rebuilds_and_replaces_previous_artifacts(self):
+        makefile = (package.ROOT / "Makefile").read_text()
+        self.assertIn(".PHONY: dist", makefile)
+        self.assertIn("dist:\n\tcargo dist", makefile)
+        self.assertNotIn("--skip-build", makefile)
+        config = tomllib.loads((package.ROOT / ".cargo/config.toml").read_text())
+        command = config["alias"]["dist"]
+        self.assertIn("--manifest-path tools/dist/Cargo.toml", command)
+        self.assertIn("--locked", command)
+        self.assertFalse(command.startswith("!"))
 
     def test_packaging_does_not_reuse_an_already_mounted_volume_name(self):
         with tempfile.TemporaryDirectory() as directory:
