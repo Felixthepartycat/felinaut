@@ -8,12 +8,13 @@ pub enum Theme {
     MidnightParty,
     ConfettiSunset,
     NeonWool,
-    ArcticPop,
+    AlpinePop,
     ForestCarnival,
 }
 
 #[derive(Clone, Copy)]
 pub struct Palette {
+    pub theme: Theme,
     pub background: u32,
     pub surface: u32,
     pub elevated: u32,
@@ -33,7 +34,7 @@ impl Theme {
         Self::MidnightParty,
         Self::ConfettiSunset,
         Self::NeonWool,
-        Self::ArcticPop,
+        Self::AlpinePop,
         Self::ForestCarnival,
     ];
 
@@ -42,7 +43,7 @@ impl Theme {
             Self::MidnightParty => "Midnight Party",
             Self::ConfettiSunset => "Confetti Sunset",
             Self::NeonWool => "Neon Wool",
-            Self::ArcticPop => "Arctic Pop",
+            Self::AlpinePop => "Alpine Pop",
             Self::ForestCarnival => "Forest Carnival",
         }
     }
@@ -50,6 +51,7 @@ impl Theme {
     pub fn palette(self) -> Palette {
         match self {
             Self::MidnightParty => Palette {
+                theme: self,
                 background: 0x2b0a54,
                 surface: 0x3c126f,
                 elevated: 0x512287,
@@ -64,6 +66,7 @@ impl Theme {
                 dark: true,
             },
             Self::ConfettiSunset => Palette {
+                theme: self,
                 background: 0xfff8ed,
                 surface: 0xffffff,
                 elevated: 0xffe6ee,
@@ -78,6 +81,7 @@ impl Theme {
                 dark: false,
             },
             Self::NeonWool => Palette {
+                theme: self,
                 background: 0x1b0638,
                 surface: 0x341364,
                 elevated: 0x4c2383,
@@ -91,7 +95,8 @@ impl Theme {
                 highlight: 0xffd83d,
                 dark: true,
             },
-            Self::ArcticPop => Palette {
+            Self::AlpinePop => Palette {
+                theme: self,
                 background: 0xf2faff,
                 surface: 0xffffff,
                 elevated: 0xdff3ff,
@@ -106,6 +111,7 @@ impl Theme {
                 dark: false,
             },
             Self::ForestCarnival => Palette {
+                theme: self,
                 background: 0xf3fff2,
                 surface: 0xffffff,
                 elevated: 0xe0f5df,
@@ -169,6 +175,12 @@ mod tests {
         let b = luminance(b);
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
+    #[test]
+    fn mountain_theme_is_named_alpine_pop() {
+        assert_eq!(Theme::AlpinePop.name(), "Alpine Pop");
+        assert!(Theme::ALL.contains(&Theme::AlpinePop));
+    }
+
     #[test]
     fn text_is_readable_in_every_theme() {
         for theme in Theme::ALL {

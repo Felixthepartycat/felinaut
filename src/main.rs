@@ -450,7 +450,14 @@ impl Browser {
                                     .text_color(rgb(p.muted))
                                     .child("SMALL BROWSER. BIG CURIOSITY."),
                             )
-                            .child(brand::mascot().w(px(280.)).h(px(210.)).flex_shrink_0())
+                            .child(
+                                brand::mascot()
+                                    .w(px(280.))
+                                    .h(px(210.))
+                                    .flex_shrink_0()
+                                    .relative()
+                                    .top(px((phase * 1.2).sin() * 6.)),
+                            )
                             .child(
                                 div()
                                     .font_family("Georgia")

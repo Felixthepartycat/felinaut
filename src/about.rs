@@ -66,6 +66,19 @@ pub fn open(cx: &mut App) {
     }
 }
 
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "Native integration test verifies the real animation timer"
+)]
+pub fn animation_phase_for_test(cx: &mut App) -> f32 {
+    cx.global::<AboutWindow>()
+        .handle
+        .expect("About is open")
+        .update(cx, |about, _, _| about.phase)
+        .expect("live About window")
+}
+
 struct About {
     focus: FocusHandle,
     phase: f32,
@@ -135,6 +148,11 @@ fn chip(label: &'static str, color: u32, p: Palette) -> impl IntoElement {
 impl Render for About {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = theme::palette(cx);
+        let phase = if theme::motion_allowed(cx) {
+            self.phase
+        } else {
+            0.
+        };
         div()
             .id("about-felifox")
             .key_context("FelifoxAbout")
@@ -146,7 +164,7 @@ impl Render for About {
             .bg(rgb(p.background))
             .text_color(rgb(p.text))
             .font_family(".AppleSystemUIFont")
-            .child(art::backdrop(p, self.phase).absolute().inset_0())
+            .child(art::backdrop(p, phase).absolute().inset_0())
             .child(
                 div()
                     .relative()
@@ -169,7 +187,14 @@ impl Render for About {
                             .child(brand::symbol().size(px(18.)))
                             .child("A LITTLE CURIOSITY GOES A LONG WAY"),
                     )
-                    .child(brand::mascot().w(px(300.)).h(px(225.)).flex_shrink_0())
+                    .child(
+                        brand::mascot()
+                            .w(px(300.))
+                            .h(px(225.))
+                            .flex_shrink_0()
+                            .relative()
+                            .top(px((phase * 1.2).sin() * 6.)),
+                    )
                     .child(
                         div()
                             .flex()

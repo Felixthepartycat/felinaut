@@ -90,7 +90,7 @@ fn main() {
             frame().await;
 
             // Exercise the same handlers as the rows, not mouse hit-testing.
-            for expected in [Theme::NeonWool, Theme::ConfettiSunset] {
+            for expected in Theme::ALL {
                 parent.update(cx, |_, window, cx| appearance::open(window, cx)).unwrap();
                 frame().await;
                 cx.update(|cx| {
@@ -132,6 +132,26 @@ fn main() {
                 handle
             }).unwrap();
             frame().await;
+            let paused = cx.update(about::animation_phase_for_test).unwrap();
+            frame().await;
+            assert_eq!(paused, cx.update(about::animation_phase_for_test).unwrap(), "disabled artwork must not advance");
+            let reduced = cx.update(|cx| {
+                cx.update_global::<ThemeSettings, _>(|settings, _| settings.animate = true);
+                theme::system_reduced_motion()
+            }).unwrap();
+            about.update(cx, |_, window, _| window.activate_window()).unwrap();
+            Timer::after(Duration::from_millis(700)).await;
+            let advanced = cx.update(about::animation_phase_for_test).unwrap();
+            if reduced {
+                assert_eq!(paused, advanced, "macOS Reduce Motion must be respected");
+            } else {
+                assert!(advanced - paused > 0.1, "the actual native artwork timer must visibly advance when enabled: {paused} -> {advanced}");
+            }
+            cx.update(|cx| cx.update_global::<ThemeSettings, _>(|settings, _| settings.animate = false)).unwrap();
+            frame().await;
+            let stopped = cx.update(about::animation_phase_for_test).unwrap();
+            frame().await;
+            assert_eq!(stopped, cx.update(about::animation_phase_for_test).unwrap(), "disabling animation stops the timer");
             about.update(cx, |_, window, cx| {
                 window.dispatch_action(Box::new(about::CloseAbout), cx);
             }).unwrap();
@@ -140,7 +160,7 @@ fn main() {
                 assert_eq!(cx.windows().len(), 1, "CloseAbout removes only About");
                 assert!(parent.read(cx).is_ok(), "parent survives About close");
                 result.set(true);
-                println!("PASS: SVG rasterization, brand/art rendering, dark/light selection handlers, animation toggle handler, About singleton/theme update/close, parent lifecycle");
+                println!("PASS: SVG rasterization, five-theme art rendering, theme selection, actual animation timer start/stop and Reduce Motion, About lifecycle");
                 parent.update(cx, |_, window, _| window.remove_window()).unwrap();
                 cx.quit();
             }).unwrap();
