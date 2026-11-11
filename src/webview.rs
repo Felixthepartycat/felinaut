@@ -40,7 +40,12 @@ impl NativePage {
         let load_sender = sender.clone();
         let title_sender = sender.clone();
         let link_sender = sender.clone();
-        let webview = WebViewBuilder::new()
+        let mut builder = WebViewBuilder::new();
+        if agent_enabled() {
+            builder =
+                builder.with_initialization_script_for_main_only(include_str!("agent.js"), true);
+        }
+        let webview = builder
             .with_initialization_script_for_main_only(include_str!("link_interactions.js"), false)
             .with_initialization_script_for_main_only(include_str!("audio_control.js"), false)
             .with_initialization_script_for_main_only(include_str!("page_icon.js"), true)
@@ -182,6 +187,139 @@ impl NativePage {
         events
     }
 
+    /// Runs a script. The callback gets the JSON text of its result, or nothing if it threw.
+    /// Wry drops the script, and the callback, while the first page still loads.
+    pub fn evaluate(
+        &self,
+        script: &str,
+        callback: impl Fn(String) + Send + 'static,
+    ) -> Result<(), String> {
+        self.webview
+            .evaluate_script_with_callback(script, callback)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Sends a real left click to the page. `x` and `y` are viewport coordinates from
+    /// JavaScript. The page sees trusted events, unlike events that a script makes.
+    pub fn native_click(&self, x: f64, y: f64) -> Result<(), String> {
+        use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+        use wry::WebViewExtMacOS;
+        let view = self.webview.webview();
+        let window = view.window().ok_or("The page has no window")?;
+        let y = if view.isFlipped() {
+            y
+        } else {
+            view.bounds().size.height - y
+        };
+        let location = view.convertPoint_toView(objc2_foundation::NSPoint::new(x, y), None);
+        let time = objc2_foundation::NSProcessInfo::processInfo().systemUptime();
+        for (kind, clicks) in [
+            (NSEventType::MouseMoved, 0),
+            (NSEventType::LeftMouseDown, 1),
+            (NSEventType::LeftMouseUp, 1),
+        ] {
+            let event = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                kind,
+                location,
+                NSEventModifierFlags::empty(),
+                time,
+                window.windowNumber(),
+                None,
+                0,
+                clicks,
+                1.0,
+            )
+            .ok_or("AppKit could not make the mouse event")?;
+            match kind {
+                NSEventType::MouseMoved => view.mouseMoved(&event),
+                NSEventType::LeftMouseDown => view.mouseDown(&event),
+                _ => view.mouseUp(&event),
+            }
+        }
+        Ok(())
+    }
+
+    /// Inserts text at the selection of the focused field, as the keyboard does.
+    pub fn native_text(&self, text: &str) -> Result<(), String> {
+        use wry::WebViewExtMacOS;
+        let view = self.webview.webview();
+        let window = view.window().ok_or("The page has no window")?;
+        window.makeFirstResponder(Some(&view));
+        let text = objc2_foundation::NSString::from_str(text);
+        // An NSNotFound location: replace the selection.
+        let range = objc2_foundation::NSRange::new(objc2_foundation::NSNotFound as usize, 0);
+        // SAFETY: WKWebView implements NSTextInputClient; this is its text insertion method,
+        // called on the main thread with a live string.
+        let _: () =
+            unsafe { objc2::msg_send![&*view, insertText: &*text, replacementRange: range] };
+        Ok(())
+    }
+
+    /// Sends a real key press to the page. `key` is a DOM key name or one character.
+    pub fn native_key(&self, key: &str) -> Result<(), String> {
+        use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType};
+        use wry::WebViewExtMacOS;
+        let (code, characters) = native_key(key).ok_or_else(|| format!("Unknown key: {key}"))?;
+        let view = self.webview.webview();
+        let window = view.window().ok_or("The page has no window")?;
+        window.makeFirstResponder(Some(&view));
+        let characters = objc2_foundation::NSString::from_str(&characters);
+        let time = objc2_foundation::NSProcessInfo::processInfo().systemUptime();
+        for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
+            let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                kind,
+                objc2_foundation::NSPoint::new(0., 0.),
+                NSEventModifierFlags::empty(),
+                time,
+                window.windowNumber(),
+                None,
+                &characters,
+                &characters,
+                false,
+                code,
+            )
+            .ok_or("AppKit could not make the key event")?;
+            if kind == NSEventType::KeyDown {
+                view.keyDown(&event);
+            } else {
+                view.keyUp(&event);
+            }
+        }
+        Ok(())
+    }
+
+    /// Takes WebKit's own snapshot of the visible page. The callback gets PNG bytes.
+    pub fn screenshot(&self, callback: impl Fn(Result<Vec<u8>, String>) + 'static) {
+        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage};
+        use wry::WebViewExtMacOS;
+        let block = block2::RcBlock::new(
+            move |image: *mut NSImage, _: *mut objc2_foundation::NSError| {
+                // SAFETY: WebKit gives a valid image or null, on the main thread.
+                let png = unsafe { image.as_ref() }
+                    .and_then(|image| image.TIFFRepresentation())
+                    .and_then(|tiff| NSBitmapImageRep::imageRepWithData(&tiff))
+                    .and_then(|bitmap| {
+                        // SAFETY: an empty property dictionary is valid for PNG.
+                        unsafe {
+                            bitmap.representationUsingType_properties(
+                                NSBitmapImageFileType::PNG,
+                                &objc2_foundation::NSDictionary::new(),
+                            )
+                        }
+                    })
+                    .map(|png| png.to_vec())
+                    .ok_or_else(|| "WebKit could not take the snapshot".to_string());
+                callback(png);
+            },
+        );
+        // SAFETY: a live WKWebView on the main thread; WebKit copies the block.
+        unsafe {
+            self.webview
+                .webview()
+                .takeSnapshotWithConfiguration_completionHandler(None, &block)
+        };
+    }
+
     /// WKWebView has no URL before its first commit and after a failed first load; Wry's
     /// `WebView::url` unwraps it and aborts the app, so read it here.
     fn current_url(&self) -> Option<String> {
@@ -226,6 +364,42 @@ fn parse_link_event(message: &str) -> Option<Event> {
 /// Icons arrive as `data:image/png;base64,…`; anything but a small PNG is dropped.
 fn parse_icon_event(message: &str) -> Option<Event> {
     crate::icons::png_from_data_url(message.strip_prefix("felifox-icon:")?).map(Event::Icon)
+}
+
+/// Agent control is opt-in: only `FELIFOX_AGENT=1` injects `agent.js` and opens the socket.
+pub fn agent_enabled() -> bool {
+    std::env::var("FELIFOX_AGENT").as_deref() == Ok("1")
+}
+
+/// The macOS virtual key code and the characters for a DOM key name.
+fn native_key(key: &str) -> Option<(u16, String)> {
+    let (code, character) = match key {
+        "Enter" => (36, '\r'),
+        "Tab" => (48, '\t'),
+        "Escape" => (53, '\u{1b}'),
+        "Backspace" => (51, '\u{7f}'),
+        "Space" | " " => (49, ' '),
+        "Delete" => (117, '\u{f728}'),
+        "ArrowLeft" => (123, '\u{f702}'),
+        "ArrowRight" => (124, '\u{f703}'),
+        "ArrowDown" => (125, '\u{f701}'),
+        "ArrowUp" => (126, '\u{f700}'),
+        "Home" => (115, '\u{f729}'),
+        "End" => (119, '\u{f72b}'),
+        "PageUp" => (116, '\u{f72c}'),
+        "PageDown" => (121, '\u{f72d}'),
+        // ponytail: one character has key code 0, thus `event.code` is always "KeyA".
+        // Add a layout table if a site reads `code`. Modifier keys are also not available.
+        _ => {
+            let mut characters = key.chars();
+            let character = characters.next()?;
+            if characters.next().is_some() {
+                return None;
+            }
+            (0, character)
+        }
+    };
+    Some((code, character.to_string()))
 }
 
 fn allowed_url(url: &str) -> bool {
@@ -303,6 +477,15 @@ mod tests {
         ] {
             assert_eq!(parse_icon_event(message), None, "{message}");
         }
+    }
+
+    #[test]
+    fn native_keys_are_named_keys_or_one_character() {
+        use super::native_key;
+        assert_eq!(native_key("Enter"), Some((36, "\r".into())));
+        assert_eq!(native_key("é"), Some((0, "é".into())));
+        assert_eq!(native_key("Control+a"), None);
+        assert_eq!(native_key(""), None);
     }
 
     #[test]

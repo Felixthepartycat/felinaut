@@ -1,4 +1,5 @@
 mod about;
+mod agent;
 mod appearance;
 mod art;
 mod audio;
@@ -155,6 +156,8 @@ struct Browser {
     icon_dir: Option<PathBuf>,
     /// Site icons by host; `None` records a host without one so disk is read once.
     icons: RefCell<HashMap<String, Option<Arc<Image>>>>,
+    /// Commands from the control socket; `None` unless started with `FELIFOX_AGENT=1`.
+    agent: Option<agent::Queue>,
 }
 impl Browser {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -297,7 +300,56 @@ impl Browser {
             icon_dir: history::default_path()
                 .and_then(|path| path.parent().map(|dir| dir.join("icons"))),
             icons: RefCell::new(HashMap::new()),
+            agent: agent::start(),
         }
+    }
+    /// Runs one command from the control socket against the active tab.
+    fn handle_agent(
+        &mut self,
+        request: agent::Request,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use serde_json::{Value, json};
+        let command = &request.command;
+        let result = match command["cmd"].as_str().unwrap_or_default() {
+            "tabs" => Ok(self
+                .tabs
+                .iter()
+                .enumerate()
+                .map(|(index, tab)| {
+                    json!({
+                        "index": index,
+                        "title": tab.display_title(),
+                        "url": tab.url,
+                        "active": index == self.active,
+                        "loading": tab.loading,
+                    })
+                })
+                .collect()),
+            "tab" => match command["index"].as_u64().map(|index| index as usize) {
+                Some(index) if index < self.tabs.len() => {
+                    self.select_tab(index, window, cx);
+                    Ok(Value::Null)
+                }
+                _ => Err("No such tab".into()),
+            },
+            "navigate" => {
+                self.navigate(command["url"].as_str().unwrap_or_default(), window, cx);
+                let tab = &self.tabs[self.active];
+                tab.error.clone().map_or_else(|| Ok(json!(tab.url)), Err)
+            }
+            _ => {
+                let tab = &self.tabs[self.active];
+                match (&tab.page, &self.agent) {
+                    (Some(page), Some((_, queue))) if !tab.home => {
+                        return agent::run(page, request, queue);
+                    }
+                    _ => Err("The active tab has no page. Navigate first.".into()),
+                }
+            }
+        };
+        let _ = request.reply.send(agent::response(result));
     }
     fn icon_for(&self, host: &str) -> Option<Arc<Image>> {
         let mut icons = self.icons.borrow_mut();
@@ -558,6 +610,14 @@ impl Browser {
             .update(cx, |input, cx| input.set_text(text, cx));
     }
     fn poll_pages(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let requests: Vec<_> = self
+            .agent
+            .iter()
+            .flat_map(|(requests, _)| requests.try_iter())
+            .collect();
+        for request in requests {
+            self.handle_agent(request, window, cx);
+        }
         let mut changed = false;
         let mut address_changed = false;
         let mut open = Vec::new();
