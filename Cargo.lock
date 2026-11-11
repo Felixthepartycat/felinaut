@@ -1576,8 +1576,13 @@ dependencies = [
 name = "felifox"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "gpui",
+ "objc2",
  "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-web-kit",
+ "serde_json",
  "unicode-segmentation",
  "url",
  "wry",

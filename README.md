@@ -119,6 +119,30 @@ History lives in `~/Library/Application Support/Felifox/history/visits.tsv`, one
 
 Home is a GPUI page outside WebKit's history. Going back from the first web page shows Home; Forward restores the retained web page. Closing a tab destroys its webview. Opening a new tab does not allocate a webview until you navigate.
 
+## Agent control
+
+An agent that can run shell commands can drive Felifox. This is off by default.
+
+**Caution:** each process of your user that connects can use your logged-in sessions. Start Felifox with agent control only when you need it.
+
+```sh
+FELIFOX_AGENT=1 cargo run                 # opens the control socket
+cargo run --bin felifox-ctl -- snapshot   # or: target/debug/felifox-ctl snapshot
+```
+
+| Command | Result |
+| --- | --- |
+| `tabs`, `tab <index>` | List the tabs, or select one |
+| `navigate <url>` | Load a page in the active tab |
+| `snapshot` | List the visible elements that accept input, each with a reference such as `@e12` |
+| `click <@ref>`, `type <@ref> <text>`, `press <key>` | Operate the page |
+| `eval <expression>` | Evaluate one JavaScript expression |
+| `screenshot [path]` | Save WebKit's own PNG snapshot of the page |
+
+`click`, `type` and `press` send synthetic JavaScript events by default. Some sites ignore these events (`isTrusted` is false). Add `--native` to send a real mouse or keyboard event to the WKWebView.
+
+The socket is `~/Library/Application Support/Felifox/agent.sock`. Each request is one JSON line with the token from `agent.token` (a new random token for each start). Both files are readable only by your user. The commands operate the active tab, in the main frame only.
+
 ## Tab volume
 
 Every tab has its own volume, built in rather than added by an extension. Click the speaker button left of **Theme ▾** (or **Sound → Volume Controls…**) to open the popover:
