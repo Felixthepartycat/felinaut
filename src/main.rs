@@ -1407,13 +1407,18 @@ impl Browser {
             .flex_shrink_0()
             .px_2()
             .rounded_lg()
-            // Selection is the strongest fill; hover only hints, and never on the selected row.
+            // Selection is the strongest state: fill plus an outline, which light themes need
+            // because their `elevated` is close to `background`. Hover only hints.
+            .border_1()
+            .border_color(rgb(if selected { p.border } else { p.background }))
             .bg(rgb(if selected { p.elevated } else { p.background }))
             .flex()
             .items_center()
             .gap_2()
             .cursor_pointer()
-            .when(!selected, |row| row.hover(move |s| s.bg(rgb(p.surface))))
+            .when(!selected, |row| {
+                row.hover(move |s| s.bg(rgb(p.surface)).border_color(rgb(p.surface)))
+            })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
                     this.hovered_tab = Some(id);
@@ -1491,21 +1496,27 @@ impl Browser {
                         ),
                 )
             })
-            .child(
-                Self::row_control(("close", id), p)
-                    .on_hover(Self::hint_on_hover(
-                        if pinned {
-                            "Close tab, keep it pinned · ⌘W"
-                        } else {
-                            "Close tab · ⌘W"
-                        },
-                        cx,
-                    ))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.close_tab_at(index, window, cx);
-                    }))
-                    .child("×"),
+            // × only on the selected or hovered row; an unloaded pinned tab has nothing to close.
+            .when(
+                (hovered || selected) && !(pinned && tab.page.is_none()),
+                |row| {
+                    row.child(
+                        Self::row_control(("close", id), p)
+                            .on_hover(Self::hint_on_hover(
+                                if pinned {
+                                    "Close tab, keep it pinned · ⌘W"
+                                } else {
+                                    "Close tab · ⌘W"
+                                },
+                                cx,
+                            ))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_tab_at(index, window, cx);
+                            }))
+                            .child("×"),
+                    )
+                },
             )
     }
     /// Arc-style vertical tabs: pinned tabs, then a divider, New Tab and the other tabs.
@@ -1879,7 +1890,8 @@ fn main() {
                     titlebar: Some(TitlebarOptions {
                         title: Some("Felifox".into()),
                         appears_transparent: true,
-                        traffic_light_position: Some(point(px(16.), px(21.))),
+                        // Centred on the 64 px sidebar header and toolbar rows.
+                        traffic_light_position: Some(point(px(16.), px(25.))),
                     }),
                     ..Default::default()
                 },
