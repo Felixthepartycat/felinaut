@@ -41,39 +41,106 @@ const PEEK_MARGIN: f32 = 24.;
 struct DraggedTab(u64);
 /// The sidebar's right edge being dragged to resize it.
 struct SidebarResize;
-/// What follows the pointer while dragging: a tab's title, or nothing for a resize.
-struct DragPreview(Option<(SharedString, Palette)>);
+/// A faint copy of the dragged tab that follows the pointer, Arc-style.
+struct Ghost {
+    title: SharedString,
+    icon: Option<Arc<Image>>,
+    size: Size<Pixels>,
+    p: Palette,
+}
+/// What follows the pointer while dragging: a tab ghost, or nothing for a resize.
+struct DragPreview(Option<Ghost>);
 impl Render for DragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().when_some(self.0.clone(), |preview, (title, p)| {
+        div().when_some(self.0.as_ref(), |preview, ghost| {
+            let p = ghost.p;
             preview
-                .max_w(px(220.))
-                .px_3()
-                .py_1()
+                .w(ghost.size.width)
+                .h(ghost.size.height)
+                .px_2()
                 .rounded_lg()
                 .bg(rgb(p.elevated))
-                .border_1()
-                .border_color(rgb(p.border))
+                .opacity(0.7)
+                .flex()
+                .items_center()
+                .gap_2()
                 .text_sm()
                 .text_color(rgb(p.text))
                 .font_family(".AppleSystemUIFont")
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .child(title)
+                .when_some(ghost.icon.clone(), |row, icon| {
+                    row.child(img(icon).size(px(16.)).rounded_sm())
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(ghost.title.clone()),
+                )
         })
     }
 }
 
-/// Where a dragged tab lands once it has been removed from the list. `target` is the index of
-/// the row it was dropped on (before removal): dragging down lands below that row, dragging up
-/// above it. The result is clamped into the tab's group so pinned tabs stay first.
-fn drop_index(target: usize, pin: bool, pinned: usize, len: usize) -> usize {
+/// Where a tab dragged over a sidebar row will go: a line above or below the row, or into a
+/// split view with the row's tab. Indices are into `Browser::tabs`, before the drop.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum DropHint {
+    /// Insert before the row whose first tab is at this index.
+    Before(usize),
+    /// Insert after the row whose last tab is at this index.
+    After(usize),
+    /// Show side by side with the tab at this index.
+    Split(usize),
+}
+
+/// Where a dragged tab lands once removed from the list. `at` is the index it should precede
+/// before removal (`usize::MAX` for the end); the result is clamped into the tab's group so
+/// pinned tabs stay first.
+fn drop_index(at: usize, from: usize, pin: bool, pinned: usize, len: usize) -> usize {
+    let at = if from < at { at - 1 } else { at };
     if pin {
-        target.min(pinned)
+        at.min(pinned)
     } else {
-        target.clamp(pinned, len)
+        at.clamp(pinned, len)
     }
+}
+
+/// The Arc-style insertion line above (`top`) or below a sidebar row, with a ring at its start.
+/// Over a tile, the pin grid or the New tab row, a row's line or split preview no longer
+/// applies; those targets show their own outline instead.
+fn clear_drop_hint(
+    this: &mut Browser,
+    event: &DragMoveEvent<DraggedTab>,
+    _: &mut Window,
+    cx: &mut Context<Browser>,
+) {
+    if event.bounds.contains(&event.event.position) && this.drop_hint.take().is_some() {
+        cx.notify();
+    }
+}
+
+fn drop_line(top: bool, p: Palette) -> Div {
+    div()
+        .absolute()
+        .left(px(4.))
+        .right_0()
+        .when(top, |line| line.top(px(-3.)))
+        .when(!top, |line| line.bottom(px(-3.)))
+        .h(px(2.))
+        .rounded_full()
+        .bg(rgb(p.text))
+        .child(
+            div()
+                .absolute()
+                .left(px(-6.))
+                .top(px(-3.))
+                .size(px(8.))
+                .rounded_full()
+                .border_2()
+                .border_color(rgb(p.text))
+                .bg(rgb(p.background)),
+        )
 }
 
 /// The host of a web URL, which keys site icons and labels the title chip.
@@ -128,6 +195,9 @@ struct Tab {
     recorded: String,
     /// The URL a pinned tab reopens on launch. Pinned tabs come first in `Browser::tabs`.
     pinned: Option<String>,
+    /// The tab shown beside this one in split view. Partners are unpinned, adjacent in
+    /// `Browser::tabs` and point at each other.
+    split: Option<u64>,
 }
 impl Tab {
     /// A saved pinned tab; its page is created when it is first selected.
@@ -154,6 +224,7 @@ impl Tab {
             sound: PageSound::default(),
             recorded: String::new(),
             pinned: None,
+            split: None,
         }
     }
     /// Adds the current page to history once per URL per tab.
@@ -238,6 +309,8 @@ struct Browser {
     peek: bool,
     /// Set when a tab drag starts; with an active drag it shows the pin drop zone.
     dragging_tab: bool,
+    /// Where the tab being dragged over the rows would go: a line or a split preview.
+    drop_hint: Option<DropHint>,
     /// `None` without a home, or when the file was unreadable so it is never overwritten.
     pinned_path: Option<PathBuf>,
 }
@@ -409,6 +482,7 @@ impl Browser {
             sidebar_anim: None,
             peek: false,
             dragging_tab: false,
+            drop_hint: None,
             pinned_path,
         }
     }
@@ -439,6 +513,7 @@ impl Browser {
         }
         self.hint = None;
         let active_id = self.tabs[self.active].id;
+        self.unsplit(index);
         let mut tab = self.tabs.remove(index);
         tab.pinned = match tab.pinned {
             Some(_) => None,
@@ -450,6 +525,7 @@ impl Browser {
             .iter()
             .position(|tab| tab.id == active_id)
             .unwrap_or(0);
+        self.hide_others();
         self.save_pinned();
         cx.notify();
     }
@@ -863,6 +939,8 @@ impl Browser {
         let mut open = Vec::new();
         let mut icons = Vec::new();
         let mut page_focused = false;
+        let mut focused_tab = None;
+        let visible_partner = self.partner(self.active);
         for (index, tab) in self.tabs.iter_mut().enumerate() {
             let Some(page) = &tab.page else {
                 continue;
@@ -903,7 +981,10 @@ impl Browser {
                     Event::Open(url) => open.push((url, true)),
                     Event::OpenInBackground(url) => open.push((url, false)),
                     Event::Hover(url) => tab.hovered_link = url,
-                    Event::Focused => page_focused |= index == self.active,
+                    Event::Focused => {
+                        page_focused |= index == self.active || Some(index) == visible_partner;
+                        focused_tab = Some(index);
+                    }
                     // A new document asks for the tab's settings; default ones need no script.
                     Event::Audio(AudioReport::Hello) => {
                         if !tab.audio.is_default() {
@@ -917,6 +998,10 @@ impl Browser {
                     }) => tab.sound.report(&id, audible, limited),
                 }
             }
+        }
+        // Clicking into the other half of a split view makes it the active tab.
+        if let Some(index) = focused_tab {
+            self.activate_half(index, cx);
         }
         let address_focused = self.address.read(cx).focus_handle(cx).is_focused(window);
         if address_changed && !address_focused {
@@ -1053,15 +1138,65 @@ impl Browser {
             tabs,
         }
     }
+    /// The index of the tab shown beside `index` in split view.
+    fn partner(&self, index: usize) -> Option<usize> {
+        let id = self.tabs[index].split?;
+        self.tabs.iter().position(|tab| tab.id == id)
+    }
+    /// Ends the split view `index` is part of, if any.
+    fn unsplit(&mut self, index: usize) {
+        if let Some(partner) = self.partner(index) {
+            self.tabs[partner].split = None;
+        }
+        self.tabs[index].split = None;
+    }
+    /// Native pages stay on screen until hidden; only the active tab and its split partner
+    /// should be. The content canvas shows those two every frame.
+    fn hide_others(&self) {
+        let partner = self.partner(self.active);
+        for (index, tab) in self.tabs.iter().enumerate() {
+            if index != self.active
+                && Some(index) != partner
+                && let Some(page) = &tab.page
+            {
+                let _ = page.set_visible(false);
+            }
+        }
+        debug_assert!(self.tabs_consistent(), "tab order invariants broken");
+    }
+    /// Pinned tabs come first; split partners are unpinned, adjacent and mutual.
+    fn tabs_consistent(&self) -> bool {
+        let pinned = self.pinned_count();
+        self.tabs[pinned..].iter().all(|tab| tab.pinned.is_none())
+            && (0..self.tabs.len()).all(|index| match self.partner(index) {
+                None => self.tabs[index].split.is_none(),
+                Some(partner) => {
+                    index.abs_diff(partner) == 1
+                        && self.tabs[index].pinned.is_none()
+                        && self.tabs[partner].split == Some(self.tabs[index].id)
+                }
+            })
+    }
+    /// Makes the other half of the visible split active, keeping both pages where they are.
+    fn activate_half(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index != self.active && self.partner(self.active) == Some(index) {
+            self.active = index;
+            self.sync_address(cx);
+            cx.notify();
+        }
+    }
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.tabs[self.active].hovered_link = None;
         if let Some(page) = &self.tabs[self.active].page {
-            let _ = page.set_visible(false);
             let _ = page.focus_parent();
         }
         self.active = index;
         self.tabs[index].hovered_link = None;
         self.load_if_needed(index, window);
+        if let Some(partner) = self.partner(index) {
+            self.load_if_needed(partner, window);
+        }
+        self.hide_others();
         self.reveal_active();
         window.focus(&self.focus);
         self.sync_address(cx);
@@ -1079,11 +1214,17 @@ impl Browser {
     /// Scrolls the sidebar just enough to show the active row.
     fn reveal_active(&self) {
         let pinned = self.pinned_count();
-        // List children: the pinned grid (when pins exist), the New tab row, then the tabs.
+        // List children: the pinned grid (when pins exist), the New tab row, then the rows,
+        // where a split view's two tabs share one.
         let row = if self.active < pinned {
             0
         } else {
-            self.active - pinned + usize::from(pinned > 0) + 1
+            let row = self
+                .rows()
+                .iter()
+                .position(|&(first, last)| (first..=last).contains(&self.active))
+                .unwrap_or(0);
+            row + usize::from(pinned > 0) + 1
         };
         self.tab_scroll.scroll_to_item(row);
     }
@@ -1110,6 +1251,7 @@ impl Browser {
             self.unload_pinned(index, url, window, cx);
             return;
         }
+        self.unsplit(index);
         self.tabs.remove(index);
         if self.tabs.is_empty() {
             self.tabs.push(Tab::new(self.next_id));
@@ -1120,6 +1262,10 @@ impl Browser {
         }
         self.active = self.active.min(self.tabs.len() - 1);
         self.load_if_needed(self.active, window);
+        if let Some(partner) = self.partner(self.active) {
+            self.load_if_needed(partner, window);
+        }
+        self.hide_others();
         self.reveal_active();
         self.sync_address(cx);
         cx.notify();
@@ -1494,17 +1640,18 @@ impl Browser {
                     .text_color(rgb(p.muted)),
             )
     }
-    /// An unpinned tab; pinned ones are `pinned_tile`s.
-    fn tab_row(&self, index: usize, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// One tab inside a sidebar row: icon, title, sound and × (selected or hovered). A row
+    /// holds one cell, or two in split view.
+    fn tab_cell(&self, index: usize, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
         let tab = &self.tabs[index];
         let selected = self.active == index;
         let id = tab.id;
         let hovered = self.hovered_tab == Some(id);
-        let element = div()
+        div()
             .id(("tab", id))
-            .h(px(34.))
-            .w_full()
-            .flex_shrink_0()
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .px_2()
             .rounded_lg()
             // Selection is the strongest state: fill plus an outline, which light themes need
@@ -1532,6 +1679,7 @@ impl Browser {
             }))
             .child(
                 div()
+                    .flex_shrink_0()
                     .text_color(rgb(if selected { p.primary } else { p.muted }))
                     .child(if tab.loading && !tab.home {
                         div().child("◌").into_any_element()
@@ -1544,6 +1692,7 @@ impl Browser {
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
@@ -1573,7 +1722,6 @@ impl Browser {
                         ),
                 )
             })
-            // × only on the selected or hovered row.
             .when(hovered || selected, |row| {
                 row.child(
                     Self::row_control(("close", id), p)
@@ -1584,13 +1732,121 @@ impl Browser {
                         }))
                         .child("×"),
                 )
-            });
-        self.tab_drag(element, index, false, p, cx)
+            })
     }
-    /// Moves a dragged tab onto the row at `target`. Landing among the pinned tiles pins it,
-    /// among the other tabs unpins it; blank New Tabs cannot be pinned.
-    fn drop_tab(&mut self, id: u64, target: usize, pin: bool, cx: &mut Context<Self>) {
+    /// Unpinned tabs grouped into sidebar rows as `(first, last)` indices; a split view's two
+    /// tabs share one row.
+    fn rows(&self) -> Vec<(usize, usize)> {
+        let mut rows = Vec::new();
+        let mut index = self.pinned_count();
+        while index < self.tabs.len() {
+            let last = if self.partner(index) == Some(index + 1) {
+                index + 1
+            } else {
+                index
+            };
+            rows.push((index, last));
+            index = last + 1;
+        }
+        rows
+    }
+    /// A sidebar row (one tab, or a split view's two) and the drop target for tab drags: near
+    /// its top or bottom edge a line shows where the tab goes; over the middle of a single tab
+    /// a placeholder shows the split view that releasing opens.
+    fn tab_row(
+        &self,
+        (first, last): (usize, usize),
+        last_row: bool,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let split = first != last;
+        let cell_width = self.list_width(cx) / if split { 2. } else { 1. };
+        let hint = self.drop_hint;
+        let cells: Vec<_> = (first..=last)
+            .map(|index| {
+                let cell = self.tab_cell(index, p, cx);
+                self.draggable(cell, index, size(px(cell_width), px(34.)), p, cx)
+            })
+            .collect();
+        div()
+            .id(("row", self.tabs[first].id))
+            .relative()
+            .h(px(34.))
+            .w_full()
+            .flex_shrink_0()
+            .flex()
+            .gap_1()
+            .when(split, |row| row.rounded_lg().bg(rgb(p.surface)))
+            .children(cells)
+            .when(hint == Some(DropHint::Split(first)), |row| {
+                row.child(
+                    div()
+                        .flex_1()
+                        .h_full()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(p.text))
+                        .bg(rgb(p.surface)),
+                )
+            })
+            .when(hint == Some(DropHint::Before(first)), |row| {
+                row.child(drop_line(true, p))
+            })
+            .when(hint == Some(DropHint::After(last)), |row| {
+                row.child(drop_line(false, p))
+            })
+            .on_drag_move(
+                cx.listener(move |this, event: &DragMoveEvent<DraggedTab>, _, cx| {
+                    let at = event.event.position;
+                    let bounds = event.bounds;
+                    let hint = if bounds.contains(&at) {
+                        let y = (at.y - bounds.top()) / bounds.size.height;
+                        let dragged = event.drag(cx).0;
+                        let own = (first..=last)
+                            .any(|index| this.tabs.get(index).is_some_and(|t| t.id == dragged));
+                        // Only a single tab other than the dragged one can become a split.
+                        let can_split = !split && !own;
+                        if y < 0.3 || (!can_split && y < 0.5) {
+                            DropHint::Before(first)
+                        } else if y > 0.7 || !can_split {
+                            DropHint::After(last)
+                        } else {
+                            DropHint::Split(first)
+                        }
+                    } else if last_row
+                        && at.y > bounds.bottom()
+                        && (bounds.left()..bounds.right()).contains(&at.x)
+                    {
+                        DropHint::After(last)
+                    } else {
+                        return;
+                    };
+                    if this.drop_hint != Some(hint) {
+                        this.drop_hint = Some(hint);
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_drop(cx.listener(|this, dragged: &DraggedTab, window, cx| {
+                this.apply_drop(dragged.0, window, cx);
+            }))
+    }
+    /// Applies the line or split the pointer was showing when a tab drag was released.
+    fn apply_drop(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        match self.drop_hint.take() {
+            Some(DropHint::Before(index)) => self.drop_tab(id, index, false, cx),
+            Some(DropHint::After(index)) => self.drop_tab(id, index + 1, false, cx),
+            Some(DropHint::Split(index)) => self.split_tabs(id, index, window, cx),
+            None => self.dragging_tab = false,
+        }
+    }
+    /// Moves a dragged tab before the tab at `at` (pre-removal index, `usize::MAX` for the
+    /// end). Landing among pinned tiles pins it, among rows unpins it; either way it leaves
+    /// any split view. Blank New Tabs cannot be pinned.
+    fn drop_tab(&mut self, id: u64, at: usize, pin: bool, cx: &mut Context<Self>) {
         self.dragging_tab = false;
+        self.drop_hint = None;
         let Some(from) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
@@ -1598,11 +1854,12 @@ impl Browser {
             return;
         }
         let active_id = self.tabs[self.active].id;
+        self.unsplit(from);
         let mut tab = self.tabs.remove(from);
         if pin != tab.pinned.is_some() {
             tab.pinned = pin.then(|| tab.url.clone());
         }
-        let to = drop_index(target, pin, self.pinned_count(), self.tabs.len());
+        let to = drop_index(at, from, pin, self.pinned_count(), self.tabs.len());
         self.tabs.insert(to, tab);
         self.active = self
             .tabs
@@ -1610,33 +1867,77 @@ impl Browser {
             .position(|tab| tab.id == active_id)
             .unwrap_or(0);
         self.hovered_tab = None;
+        self.hide_others();
         self.save_pinned();
         cx.notify();
     }
-    /// Makes a tab row or tile draggable and a drop target that takes its place.
-    fn tab_drag(
+    /// Shows the dragged tab beside the tab at `target` in split view and activates it.
+    fn split_tabs(&mut self, id: u64, target: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.dragging_tab = false;
+        let (Some(from), Some(target_tab)) = (
+            self.tabs.iter().position(|tab| tab.id == id),
+            self.tabs.get(target),
+        ) else {
+            return;
+        };
+        let target_id = target_tab.id;
+        if target_id == id || target_tab.split.is_some() || target_tab.pinned.is_some() {
+            return;
+        }
+        let active_id = self.tabs[self.active].id;
+        self.unsplit(from);
+        let mut tab = self.tabs.remove(from);
+        tab.pinned = None;
+        tab.split = Some(target_id);
+        let left = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == target_id)
+            .unwrap_or(0);
+        self.tabs.insert(left + 1, tab);
+        self.tabs[left].split = Some(id);
+        self.active = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == active_id)
+            .unwrap_or(0);
+        self.hovered_tab = None;
+        self.save_pinned();
+        self.select_tab(left + 1, window, cx);
+    }
+    /// The sidebar list's inner width: the sidebar minus its border and padding.
+    fn list_width(&self, cx: &App) -> f32 {
+        cx.global::<ThemeSettings>().sidebar_width - 1. - 16.
+    }
+    /// Makes a row cell or tile draggable, with a faint ghost of it following the pointer.
+    fn draggable(
         &self,
         element: Stateful<Div>,
         index: usize,
-        pin: bool,
+        size: Size<Pixels>,
         p: Palette,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let tab = &self.tabs[index];
         let title = SharedString::from(tab.display_title());
+        let icon = (!tab.home)
+            .then(|| host(&tab.url))
+            .flatten()
+            .and_then(|host| self.icon_for(&host));
         let browser = cx.weak_entity();
-        element
-            .on_drag(DraggedTab(tab.id), move |_, _, _, cx| {
-                let _ = browser.update(cx, |this, cx| {
-                    this.dragging_tab = true;
-                    cx.notify();
-                });
-                cx.new(|_| DragPreview(Some((title.clone(), p))))
-            })
-            .drag_over::<DraggedTab>(move |style, _, _, _| style.border_color(rgb(p.primary)))
-            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
-                this.drop_tab(dragged.0, index, pin, cx);
-            }))
+        element.on_drag(DraggedTab(tab.id), move |_, _, _, cx| {
+            let _ = browser.update(cx, |this, cx| {
+                this.dragging_tab = true;
+                cx.notify();
+            });
+            let ghost = Ghost {
+                title: title.clone(),
+                icon: icon.clone(),
+                size,
+                p,
+            };
+            cx.new(|_| DragPreview(Some(ghost)))
+        })
     }
     /// The sidebar's current width: its saved width or 0, eased in between while it slides.
     fn sidebar_width(&self, cx: &App) -> f32 {
@@ -1655,7 +1956,7 @@ impl Browser {
         let id = tab.id;
         // Three tiles and two 8 px gaps fill the grid: the width minus the sidebar border,
         // the list padding and the grid's own drop-target border.
-        let tile = (cx.global::<ThemeSettings>().sidebar_width - 1. - 16. - 2. - 16.) / 3.;
+        let tile = (self.list_width(cx) - 2. - 16.) / 3.;
         let element =
             div()
                 .id(("pinned", id))
@@ -1692,12 +1993,25 @@ impl Browser {
                     },
                 ));
         // Pin and unpin by dragging or ⌘D; ⌘W on a selected tile frees its page, keeping the pin.
-        self.tab_drag(element, index, true, p, cx)
+        // A tab dropped on a tile takes its place: after it when dragged forward, before it
+        // when dragged back.
+        self.draggable(element, index, size(px(tile), px(46.)), p, cx)
+            .drag_over::<DraggedTab>(move |style, _, _, _| style.border_color(rgb(p.text)))
+            .on_drag_move(cx.listener(clear_drop_hint))
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                let from = this.tabs.iter().position(|tab| tab.id == dragged.0);
+                let at = if from.is_some_and(|from| from < index) {
+                    index + 1
+                } else {
+                    index
+                };
+                this.drop_tab(dragged.0, at, true, cx);
+            }))
     }
     /// Arc-style vertical tabs: pinned tiles, then New tab and the other tabs.
     fn sidebar_view(&self, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
         let pinned = self.pinned_count();
-        let tab_count = self.tabs.len();
+        let rows = self.rows();
         // Dragging a tab with nothing pinned yet offers a place to pin it.
         let pin_zone = pinned == 0 && self.dragging_tab && cx.has_active_drag();
         div()
@@ -1748,8 +2062,9 @@ impl Browser {
                                 .border_1()
                                 .border_color(rgb(p.background))
                                 .drag_over::<DraggedTab>(move |style, _, _, _| {
-                                    style.border_color(rgb(p.primary))
+                                    style.border_color(rgb(p.text))
                                 })
+                                .on_drag_move(cx.listener(clear_drop_hint))
                                 .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
                                     this.drop_tab(dragged.0, usize::MAX, true, cx);
                                 }))
@@ -1771,8 +2086,9 @@ impl Browser {
                             .border_1()
                             .border_color(rgb(p.background))
                             .drag_over::<DraggedTab>(move |style, _, _, _| {
-                                style.border_color(rgb(p.primary))
+                                style.border_color(rgb(p.text))
                             })
+                            .on_drag_move(cx.listener(clear_drop_hint))
                             .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
                                 // 0 clamps to the first unpinned slot, counted after removal.
                                 this.drop_tab(dragged.0, 0, false, cx);
@@ -1804,7 +2120,15 @@ impl Browser {
                             .child(div().flex_1().child("New tab"))
                             .child("⌘T"),
                     )
-                    .children((pinned..tab_count).map(|index| self.tab_row(index, p, cx))),
+                    .children(
+                        rows.iter()
+                            .enumerate()
+                            .map(|(n, &row)| self.tab_row(row, n + 1 == rows.len(), p, cx)),
+                    )
+                    // Releasing in a gap between rows still lands where the line shows.
+                    .on_drop(cx.listener(|this, dragged: &DraggedTab, window, cx| {
+                        this.apply_drop(dragged.0, window, cx);
+                    })),
             )
             .child(
                 // The right edge drags to resize; the width is saved when the drag ends.
@@ -1827,8 +2151,39 @@ impl Browser {
                     }),
             )
     }
-    fn content(&self, cx: &mut Context<Self>) -> AnyElement {
-        let tab = &self.tabs[self.active];
+    /// The active tab's page, or the active split view's two pages side by side.
+    fn content(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let Some(partner) = self.partner(self.active) else {
+            return self.tab_content(self.active, cx);
+        };
+        let halves = [self.active.min(partner), self.active.max(partner)];
+        div()
+            .size_full()
+            .flex()
+            .gap(px(6.))
+            .p(px(6.))
+            .bg(rgb(p.background))
+            .children(halves.map(|index| {
+                let active = index == self.active;
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .rounded_lg()
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(rgb(if active { p.primary } else { p.border }))
+                    // Native pages report their own clicks; this catches the GPUI New Tab page.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| this.activate_half(index, cx)),
+                    )
+                    .child(self.tab_content(index, cx))
+            }))
+            .into_any_element()
+    }
+    fn tab_content(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let tab = &self.tabs[index];
         if tab.home {
             return self.home_page(cx);
         }
@@ -1856,6 +2211,10 @@ impl Render for Browser {
         let address_focused = self.address.read(cx).focus_handle(cx).is_focused(window);
         let display = cx.global::<ThemeSettings>().address;
         let sidebar_width = self.sidebar_width(cx);
+        // A drag released outside every drop target leaves no line behind.
+        if !cx.has_active_drag() {
+            self.drop_hint = None;
+        }
         if self
             .sidebar_anim
             .is_some_and(|start| start.elapsed() < SIDEBAR_SLIDE)
@@ -1883,9 +2242,12 @@ impl Render for Browser {
                     history::display_url(&tab.url)
                 )
             });
-        let status = self
-            .hint
-            .map(str::to_owned)
+        let drop_status = match self.drop_hint {
+            Some(DropHint::Split(_)) => Some("Release to show side by side".to_owned()),
+            _ => None,
+        };
+        let status = drop_status
+            .or(self.hint.map(str::to_owned))
             .or(hovered_row)
             .unwrap_or_else(|| {
                 tab.hovered_link
@@ -2013,7 +2375,7 @@ impl Render for Browser {
                             .flex_1()
                             .min_h_0()
                             .overflow_hidden()
-                            .child(self.content(cx)),
+                            .child(self.content(p, cx)),
                     )
                     .child(
                         div()
@@ -2178,46 +2540,53 @@ fn main() {
 mod tests {
     use super::drop_index;
 
-    /// Replays `drop_tab` on pinned flags and ids: remove, then insert at `drop_index`.
-    fn drop(tabs: &[(u8, bool)], from: usize, target: usize, pin: bool) -> Vec<(u8, bool)> {
+    /// Replays `drop_tab` on (id, pinned) pairs: remove, then insert at `drop_index`.
+    fn drop(tabs: &[(u8, bool)], from: usize, at: usize, pin: bool) -> Vec<(u8, bool)> {
         let mut tabs = tabs.to_vec();
         let (id, _) = tabs.remove(from);
         let pinned = tabs.iter().take_while(|(_, p)| *p).count();
-        let to = drop_index(target, pin, pinned, tabs.len());
+        let to = drop_index(at, from, pin, pinned, tabs.len());
         tabs.insert(to, (id, pin));
         tabs
     }
 
     #[test]
-    fn reorders_within_and_across_groups() {
+    fn lands_where_the_line_shows() {
         let tabs = [(1, true), (2, true), (3, false), (4, false), (5, false)];
-        // Down lands below the target row, up lands above it.
+        // The line below tab 5 (`at` = 5) and above tab 3 (`at` = 2).
         assert_eq!(
-            drop(&tabs, 2, 4, false),
+            drop(&tabs, 2, 5, false),
             [(1, true), (2, true), (4, false), (5, false), (3, false)]
         );
         assert_eq!(
             drop(&tabs, 4, 2, false),
             [(1, true), (2, true), (5, false), (3, false), (4, false)]
         );
-        // Onto a tile pins; onto a row unpins; the grid itself pins at the end.
+        // Dropping just above or below itself changes nothing.
+        assert_eq!(drop(&tabs, 3, 3, false), tabs);
+        assert_eq!(drop(&tabs, 3, 4, false), tabs);
+    }
+
+    #[test]
+    fn pins_and_unpins_across_groups() {
+        let tabs = [(1, true), (2, true), (3, false), (4, false), (5, false)];
+        // Onto the first tile pins before it; the grid itself pins at the end.
         assert_eq!(
             drop(&tabs, 4, 0, true),
             [(5, true), (1, true), (2, true), (3, false), (4, false)]
         );
         assert_eq!(
-            drop(&tabs, 0, 3, false),
-            [(2, true), (3, false), (4, false), (1, false), (5, false)]
-        );
-        assert_eq!(
             drop(&tabs, 3, usize::MAX, true),
             [(1, true), (2, true), (4, true), (3, false), (5, false)]
         );
-        // The New tab row (target 0, unpinned) puts it at the top of the other tabs.
+        // A pinned tab dropped below tab 4 unpins there; New tab (`at` = 0) puts it on top.
+        assert_eq!(
+            drop(&tabs, 0, 4, false),
+            [(2, true), (3, false), (4, false), (1, false), (5, false)]
+        );
         assert_eq!(
             drop(&tabs, 0, 0, false),
             [(2, true), (1, false), (3, false), (4, false), (5, false)]
         );
-        assert_eq!(drop(&tabs, 4, 0, false)[2], (5, false));
     }
 }
