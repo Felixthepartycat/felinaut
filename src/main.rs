@@ -55,9 +55,17 @@ actions!(
         VolumeControls,
         MuteTab,
         ToggleSidebar,
-        PinTab
+        PinTab,
+        NextTab,
+        PreviousTab
     ]
 );
+
+/// ⌘1–⌘8 select that tab in sidebar order; `LAST_TAB` (⌘9) selects the last one.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = felifox, no_json)]
+struct ActivateTab(usize);
+const LAST_TAB: usize = usize::MAX;
 
 struct Tab {
     id: u64,
@@ -174,7 +182,6 @@ struct Browser {
     icons: RefCell<HashMap<String, Option<Arc<Image>>>>,
     /// Commands from the control socket; `None` unless started with `FELIFOX_AGENT=1`.
     agent: Option<agent::Queue>,
-    show_sidebar: bool,
     /// What the hovered sidebar control does, shown in the status bar. GPUI tooltips would
     /// draw underneath the native page, so the status bar carries them instead.
     hint: Option<&'static str>,
@@ -346,7 +353,6 @@ impl Browser {
                 .and_then(|path| path.parent().map(|dir| dir.join("icons"))),
             icons: RefCell::new(HashMap::new()),
             agent: agent::start(),
-            show_sidebar: true,
             hint: None,
             hovered_tab: None,
             tab_scroll: ScrollHandle::new(),
@@ -397,9 +403,34 @@ impl Browser {
     fn pin_tab(&mut self, _: &PinTab, _: &mut Window, cx: &mut Context<Self>) {
         self.toggle_pin_at(self.active, cx);
     }
+    /// Saved with the other settings, so the sidebar stays collapsed across launches.
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
-        self.show_sidebar = !self.show_sidebar;
+        self.hint = None;
+        cx.update_global::<ThemeSettings, _>(|settings, _| {
+            settings.sidebar = !settings.sidebar;
+            settings.save();
+        });
         cx.notify();
+    }
+    fn activate_tab(&mut self, action: &ActivateTab, window: &mut Window, cx: &mut Context<Self>) {
+        let index = action.0.min(self.tabs.len() - 1);
+        self.select_tab(index, window, cx);
+    }
+    /// Cycles through tabs in sidebar order, wrapping at either end.
+    fn step_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let count = self.tabs.len();
+        let index = if forward {
+            (self.active + 1) % count
+        } else {
+            (self.active + count - 1) % count
+        };
+        self.select_tab(index, window, cx);
+    }
+    fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_tab(true, window, cx);
+    }
+    fn previous_tab(&mut self, _: &PreviousTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_tab(false, window, cx);
     }
     /// Pinned tabs restored at launch have no page until they are first shown.
     fn load_if_needed(&mut self, index: usize, window: &mut Window) {
@@ -1350,7 +1381,7 @@ impl Browser {
                 cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
             )
             .on_hover(Self::hint_on_hover(
-                if self.show_sidebar {
+                if cx.global::<ThemeSettings>().sidebar {
                     "Hide sidebar · ⌘S"
                 } else {
                     "Show sidebar · ⌘S"
@@ -1578,6 +1609,7 @@ impl Render for Browser {
         let p = theme::palette(cx);
         let address_focused = self.address.read(cx).focus_handle(cx).is_focused(window);
         let display = cx.global::<ThemeSettings>().address;
+        let show_sidebar = cx.global::<ThemeSettings>().sidebar;
         let tab = &self.tabs[self.active];
         let show_chip = !tab.home && !address_focused && display != AddressDisplay::Url;
         let back_enabled = tab.can_go_back();
@@ -1629,9 +1661,10 @@ impl Render for Browser {
             .on_action(cx.listener(Self::volume_controls))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::pin_tab))
-            .when(self.show_sidebar, |root| {
-                root.child(self.sidebar_view(p, cx))
-            })
+            .on_action(cx.listener(Self::activate_tab))
+            .on_action(cx.listener(Self::next_tab))
+            .on_action(cx.listener(Self::previous_tab))
+            .when(show_sidebar, |root| root.child(self.sidebar_view(p, cx)))
             .child(
                 div()
                     .flex_1()
@@ -1648,7 +1681,7 @@ impl Render for Browser {
                             .px_4()
                             .gap_2()
                             .bg(rgb(p.surface))
-                            .when(!self.show_sidebar, |bar| {
+                            .when(!show_sidebar, |bar| {
                                 bar.pl(px(88.)).child(self.sidebar_button(p, cx))
                             })
                             .child(
@@ -1759,7 +1792,15 @@ fn main() {
                 KeyBinding::new("cmd-shift-m", MuteTab, None),
                 KeyBinding::new("cmd-s", ToggleSidebar, None),
                 KeyBinding::new("cmd-d", PinTab, None),
+                KeyBinding::new("ctrl-tab", NextTab, None),
+                KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
+                KeyBinding::new("cmd-shift-]", NextTab, None),
+                KeyBinding::new("cmd-shift-[", PreviousTab, None),
+                KeyBinding::new("cmd-9", ActivateTab(LAST_TAB), None),
             ]);
+            cx.bind_keys(
+                (1..=8).map(|n| KeyBinding::new(&format!("cmd-{n}"), ActivateTab(n - 1), None)),
+            );
             // Native menu equivalents remain available while WKWebView owns keyboard focus.
             cx.set_menus(vec![
                 Menu {
@@ -1789,7 +1830,20 @@ fn main() {
                 },
                 Menu {
                     name: "View".into(),
-                    items: vec![MenuItem::action("Toggle Sidebar", ToggleSidebar)],
+                    // Menu items keep these working while the page has keyboard focus.
+                    items: [
+                        MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                        MenuItem::separator(),
+                        MenuItem::action("Show Next Tab", NextTab),
+                        MenuItem::action("Show Previous Tab", PreviousTab),
+                        MenuItem::separator(),
+                    ]
+                    .into_iter()
+                    .chain(
+                        (1..=8).map(|n| MenuItem::action(format!("Tab {n}"), ActivateTab(n - 1))),
+                    )
+                    .chain([MenuItem::action("Last Tab", ActivateTab(LAST_TAB))])
+                    .collect(),
                 },
                 Menu {
                     name: "Navigate".into(),

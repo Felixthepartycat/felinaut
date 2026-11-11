@@ -176,6 +176,8 @@ pub struct ThemeSettings {
     /// Preference, additionally constrained by macOS Reduce Motion.
     pub animate: bool,
     pub address: AddressDisplay,
+    /// Whether the vertical tab sidebar is shown (⌘S).
+    pub sidebar: bool,
 }
 impl Global for ThemeSettings {}
 
@@ -185,6 +187,7 @@ impl Default for ThemeSettings {
             theme: Theme::default(),
             animate: true,
             address: AddressDisplay::default(),
+            sidebar: true,
         }
     }
 }
@@ -209,6 +212,7 @@ impl ThemeSettings {
                     }
                 }
                 ("animate", value) => settings.animate = value != "false",
+                ("sidebar", value) => settings.sidebar = value != "false",
                 ("address", value) => {
                     if let Some(display) =
                         AddressDisplay::ALL.into_iter().find(|d| d.key() == value)
@@ -224,10 +228,11 @@ impl ThemeSettings {
 
     pub fn serialize(&self) -> String {
         format!(
-            "theme={}\nanimate={}\naddress={}\n",
+            "theme={}\nanimate={}\naddress={}\nsidebar={}\n",
             self.theme.key(),
             self.animate,
-            self.address.key()
+            self.address.key(),
+            self.sidebar
         )
     }
 
@@ -237,7 +242,7 @@ impl ThemeSettings {
             .map_or_else(Self::default, |text| Self::parse(&text))
     }
 
-    /// Three short lines, written when the user changes a choice.
+    /// A few short lines, written when the user changes a choice.
     pub fn save(&self) {
         // The native UI tests drive these handlers; they must not touch the user's file.
         if cfg!(test) {
@@ -300,12 +305,17 @@ mod tests {
             theme: Theme::AlpinePop,
             animate: false,
             address: AddressDisplay::Domain,
+            sidebar: false,
         };
         let text = settings.serialize();
-        assert_eq!(text, "theme=alpine-pop\nanimate=false\naddress=domain\n");
+        assert_eq!(
+            text,
+            "theme=alpine-pop\nanimate=false\naddress=domain\nsidebar=false\n"
+        );
         let parsed = ThemeSettings::parse(&text);
         assert_eq!(parsed.theme, Theme::AlpinePop);
         assert!(!parsed.animate);
+        assert!(!parsed.sidebar);
         assert_eq!(parsed.address, AddressDisplay::Domain);
 
         let sloppy = ThemeSettings::parse("junk\ntheme = Neon Wool\naddress=url\nanimate=yes\n");
@@ -317,7 +327,7 @@ mod tests {
         assert_eq!(sloppy.address, AddressDisplay::Url);
         assert!(sloppy.animate);
         let empty = ThemeSettings::parse("");
-        assert!(empty.animate && empty.address == AddressDisplay::Title);
+        assert!(empty.animate && empty.address == AddressDisplay::Title && empty.sidebar);
     }
 
     #[test]

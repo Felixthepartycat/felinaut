@@ -100,8 +100,10 @@ hdiutil verify dist/Felifox-0.1-beta-macos-arm64.dmg
 | `⌘[` / `⌘]` | Back / forward               |
 | `⌘⇧H`       | Home                         |
 | `⌘⇧M`       | Mute / unmute active tab     |
-| `⌘S`        | Show / hide the tab sidebar  |
+| `⌘S`        | Show / hide the tab sidebar (remembered) |
 | `⌘D`        | Pin / unpin active tab       |
+| `⌘1`–`⌘8` / `⌘9` | Go to tab 1–8 / last tab |
+| `⌃Tab` / `⌃⇧Tab` | Next / previous tab (also `⌘⇧]` / `⌘⇧[`) |
 | `⌘Q`        | Quit                         |
 
 ### Title-first address bar and history suggestions
