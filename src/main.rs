@@ -813,7 +813,8 @@ impl Browser {
         };
         div()
             .id("title-chip")
-            .h(px(42.))
+            // The address field's height, matching the 34 pt toolbar buttons.
+            .h(px(34.))
             .w_full()
             .min_w_0()
             .rounded_lg()
@@ -2231,14 +2232,20 @@ impl Browser {
                 .flex_shrink_0()
                 .rounded_xl()
                 .border_1()
-                .border_color(rgb(if selected { p.border } else { p.surface }))
+                // Light themes' white tiles vanish on their near-white sidebar without an edge.
+                .border_color(rgb(if selected || !p.dark {
+                    p.border
+                } else {
+                    p.surface
+                }))
                 .bg(rgb(if selected { p.elevated } else { p.surface }))
                 .flex()
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
                 .when(!selected, |tile| {
-                    tile.hover(move |s| s.bg(rgb(p.elevated)).border_color(rgb(p.elevated)))
+                    let edge = if p.dark { p.elevated } else { p.border };
+                    tile.hover(move |s| s.bg(rgb(p.elevated)).border_color(rgb(edge)))
                 })
                 .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                     if *hovered {
