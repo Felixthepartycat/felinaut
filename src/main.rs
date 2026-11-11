@@ -1573,22 +1573,6 @@ impl Browser {
                         ),
                 )
             })
-            // Only rendered while hovered, so a hidden pin can never catch a click.
-            .when(hovered && tab.url() != HOME, |row| {
-                row.child(
-                    Self::row_control(("pin", id), p)
-                        .on_hover(Self::hint_on_hover("Pin tab · ⌘D", cx))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.toggle_pin_at(index, cx);
-                        }))
-                        .child(
-                            brand::icon(brand::icon::PIN)
-                                .size(px(14.))
-                                .text_color(rgb(p.muted)),
-                        ),
-                )
-            })
             // × only on the selected or hovered row.
             .when(hovered || selected, |row| {
                 row.child(
@@ -1669,7 +1653,6 @@ impl Browser {
         let tab = &self.tabs[index];
         let selected = self.active == index;
         let id = tab.id;
-        let hovered = self.hovered_tab == Some(id);
         // Three tiles and two 8 px gaps fill the grid: the width minus the sidebar border,
         // the list padding and the grid's own drop-target border.
         let tile = (cx.global::<ThemeSettings>().sidebar_width - 1. - 16. - 2. - 16.) / 3.;
@@ -1707,27 +1690,8 @@ impl Browser {
                         Some(host) => self.site_icon(&host, 20., p),
                         None => brand::symbol().size(px(20.)).into_any_element(),
                     },
-                ))
-                // Unpinning lives on hover; ⌘W on a selected tile frees its page, keeping the pin.
-                .when(hovered, |tile| {
-                    tile.child(
-                        Self::row_control(("unpin", id), p)
-                            .absolute()
-                            .top(px(1.))
-                            .right(px(1.))
-                            .size(px(20.))
-                            .on_hover(Self::hint_on_hover("Unpin tab · ⌘D", cx))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.toggle_pin_at(index, cx);
-                            }))
-                            .child(
-                                brand::icon(brand::icon::PIN)
-                                    .size(px(12.))
-                                    .text_color(rgb(p.primary)),
-                            ),
-                    )
-                });
+                ));
+        // Pin and unpin by dragging or ⌘D; ⌘W on a selected tile frees its page, keeping the pin.
         self.tab_drag(element, index, true, p, cx)
     }
     /// Arc-style vertical tabs: pinned tiles, then New tab and the other tabs.
