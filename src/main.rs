@@ -8,7 +8,7 @@ mod engine;
 mod history;
 mod icons;
 mod input;
-mod pinned;
+mod session;
 mod suggestions;
 mod theme;
 mod volume;
@@ -193,6 +193,39 @@ fn drop_line(top: bool, p: Palette) -> Div {
         )
 }
 
+/// Rebuilds the sidebar from saved tabs: pinned first, split pairs re-linked only when both
+/// halves are unpinned neighbours, and the saved active tab selected, or a fresh New Tab when
+/// the active one was blank (blank tabs are not saved).
+fn restore_tabs(mut saved: Vec<session::SavedTab>) -> (Vec<Tab>, usize) {
+    saved.sort_by_key(|tab| !tab.pinned);
+    let mut tabs: Vec<Tab> = Vec::new();
+    let mut active = None;
+    for (id, entry) in (1..).zip(saved) {
+        let mut tab = Tab::pinned(id, entry.url, entry.title);
+        if !entry.pinned {
+            tab.pinned = None;
+            if entry.split
+                && let Some(left) = tabs.last_mut()
+                && left.pinned.is_none()
+                && left.split.is_none()
+            {
+                left.split = Some(id);
+                tab.split = Some(left.id);
+            }
+        }
+        if entry.active {
+            active = Some(tabs.len());
+        }
+        tabs.push(tab);
+    }
+    let active = active.unwrap_or_else(|| {
+        let at = tabs.iter().take_while(|tab| tab.pinned.is_some()).count();
+        tabs.insert(at, Tab::new(tabs.len() as u64 + 1));
+        at
+    });
+    (tabs, active)
+}
+
 /// The host of a web URL, which keys site icons and labels the title chip.
 pub fn host(url: &str) -> Option<String> {
     url::Url::parse(url)
@@ -259,7 +292,8 @@ struct Tab {
     split: Option<u64>,
 }
 impl Tab {
-    /// A saved pinned tab; its page is created when it is first selected.
+    /// A saved tab (pinned unless the caller clears `pinned`); its page is created when it is
+    /// first shown.
     fn pinned(id: u64, url: String, title: String) -> Self {
         Self {
             title: if title.is_empty() { url.clone() } else { title },
@@ -376,8 +410,10 @@ struct Browser {
     menu_focus: FocusHandle,
     /// Recently closed tabs, newest last, for ⌘⇧T.
     closed: Vec<ClosedTab>,
-    /// `None` without a home, or when the file was unreadable so it is never overwritten.
-    pinned_path: Option<PathBuf>,
+    /// `tabs.tsv`; `None` without a home, or when it was unreadable so it is never overwritten.
+    session_path: Option<PathBuf>,
+    /// What `tabs.tsv` last received, so unchanged tabs are not rewritten every poll.
+    last_session: RefCell<String>,
 }
 impl Browser {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -493,35 +529,28 @@ impl Browser {
                 {
                     eprintln!("Could not save browsing history: {error}");
                 }
-                // Titles may have changed since the last pin edit.
-                this.save_pinned();
+                this.save_session();
             });
             true
         });
         let focus = cx.focus_handle();
         window.focus(&focus);
-        let mut pinned_path = pinned::default_path();
-        let saved = match pinned_path.as_deref().map(fs::read_to_string) {
-            Some(Ok(text)) => pinned::parse(&text),
+        let mut session_path = session::default_path();
+        let saved = match session_path.as_deref().map(fs::read_to_string) {
+            Some(Ok(text)) => session::parse(&text),
             Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Some(Err(error)) => {
-                eprintln!("Could not read pinned tabs: {error}");
-                pinned_path = None;
+                eprintln!("Could not read saved tabs: {error}");
+                session_path = None;
                 Vec::new()
             }
             None => Vec::new(),
         };
-        let mut tabs: Vec<Tab> = saved
-            .into_iter()
-            .zip(1..)
-            .map(|((url, title), id)| Tab::pinned(id, url, title))
-            .collect();
-        let next_id = tabs.len() as u64 + 1;
-        tabs.push(Tab::new(next_id));
-        Self {
-            active: tabs.len() - 1,
+        let (tabs, active) = restore_tabs(saved);
+        let mut browser = Self {
+            active,
+            next_id: tabs.len() as u64 + 1,
             tabs,
-            next_id: next_id + 1,
             address,
             focus,
             _submit: subscription,
@@ -551,8 +580,15 @@ impl Browser {
             menu: None,
             menu_focus: cx.focus_handle(),
             closed: Vec::new(),
-            pinned_path,
+            session_path,
+            last_session: RefCell::new(String::new()),
+        };
+        // Restored tabs load lazily; only the active one (and its split partner) needs a page.
+        browser.load_if_needed(active, window);
+        if let Some(partner) = browser.partner(active) {
+            browser.load_if_needed(partner, window);
         }
+        browser
     }
     fn pinned_count(&self) -> usize {
         self.tabs
@@ -560,19 +596,39 @@ impl Browser {
             .take_while(|tab| tab.pinned.is_some())
             .count()
     }
-    /// A tiny file written only on pin edits and quit, so it is written synchronously.
-    fn save_pinned(&self) {
-        let Some(path) = &self.pinned_path else {
+    /// Writes `tabs.tsv` when the tabs differ from the last write. It runs on every poll and
+    /// at window close, so navigations, titles, order, pins and splits all survive a quit.
+    fn save_session(&self) {
+        let Some(path) = &self.session_path else {
             return;
         };
-        let contents = pinned::serialize(
-            self.tabs
-                .iter()
-                .filter_map(|tab| Some((tab.pinned.as_deref()?, tab.title.as_str()))),
-        );
-        if let Err(error) = history::write(path, &contents) {
-            eprintln!("Could not save pinned tabs: {error}");
+        let mut saved = Vec::new();
+        let mut previous_kept = false;
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let url = tab.pinned.clone().unwrap_or_else(|| tab.url.clone());
+            // Blank New Tabs have nothing to reopen.
+            if tab.pinned.is_none() && (tab.home || !url.starts_with("http")) {
+                previous_kept = false;
+                continue;
+            }
+            saved.push(session::SavedTab {
+                url,
+                title: tab.title.clone(),
+                pinned: tab.pinned.is_some(),
+                split: previous_kept && index > 0 && self.partner(index) == Some(index - 1),
+                active: index == self.active,
+            });
+            previous_kept = true;
         }
+        let contents = session::serialize(&saved);
+        if *self.last_session.borrow() == contents {
+            return;
+        }
+        if let Err(error) = history::write(path, &contents) {
+            eprintln!("Could not save tabs: {error}");
+        }
+        // Recorded even on failure, so a broken disk is reported once per change, not per poll.
+        *self.last_session.borrow_mut() = contents;
     }
     /// Pins at the end of the pinned group, or unpins to the top of the other tabs.
     fn toggle_pin_at(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -594,7 +650,7 @@ impl Browser {
             .position(|tab| tab.id == active_id)
             .unwrap_or(0);
         self.hide_others();
-        self.save_pinned();
+        self.save_session();
         cx.notify();
     }
     fn pin_tab(&mut self, _: &PinTab, _: &mut Window, cx: &mut Context<Self>) {
@@ -1091,6 +1147,7 @@ impl Browser {
         }
         self.update_peek(window, cx);
         self.flush_history(cx);
+        self.save_session();
         if changed {
             cx.notify();
         }
@@ -2134,7 +2191,7 @@ impl Browser {
             .unwrap_or(0);
         self.hovered_tab = None;
         self.hide_others();
-        self.save_pinned();
+        self.save_session();
         cx.notify();
     }
     /// Shows the dragged tab beside the tab at `target` in split view and activates it.
@@ -2168,7 +2225,7 @@ impl Browser {
             .position(|tab| tab.id == active_id)
             .unwrap_or(0);
         self.hovered_tab = None;
-        self.save_pinned();
+        self.save_session();
         self.select_tab(left + 1, window, cx);
     }
     /// The sidebar list's inner width: the sidebar minus its border and padding.
@@ -2822,7 +2879,51 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::drop_index;
+    use super::{drop_index, restore_tabs, session::SavedTab};
+
+    fn saved(url: &str, pinned: bool, split: bool, active: bool) -> SavedTab {
+        SavedTab {
+            url: url.into(),
+            title: String::new(),
+            pinned,
+            split,
+            active,
+        }
+    }
+
+    #[test]
+    fn restores_order_splits_and_active_tab() {
+        // A hand-edited file: a pin after a tab, a split flag on a pin and on a first tab.
+        let (tabs, active) = restore_tabs(vec![
+            saved("https://a/", false, true, false),
+            saved("https://b/", false, true, true),
+            saved("https://p/", true, true, false),
+            saved("https://c/", false, true, false),
+        ]);
+        let urls: Vec<_> = tabs.iter().map(|tab| tab.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            ["https://p/", "https://a/", "https://b/", "https://c/"]
+        );
+        assert!(tabs[0].pinned.is_some() && tabs[1..].iter().all(|tab| tab.pinned.is_none()));
+        // a+b pair up; c's split flag has no free left half.
+        assert_eq!(tabs[1].split, Some(tabs[2].id));
+        assert_eq!(tabs[2].split, Some(tabs[1].id));
+        assert_eq!((tabs[0].split, tabs[3].split), (None, None));
+        assert_eq!(active, 2);
+        let mut ids: Vec<_> = tabs.iter().map(|tab| tab.id).collect();
+        ids.dedup();
+        assert_eq!(ids.len(), tabs.len());
+    }
+
+    #[test]
+    fn opens_a_new_tab_when_the_active_one_was_blank() {
+        let (tabs, active) = restore_tabs(vec![saved("https://p/", true, false, false)]);
+        assert_eq!(active, 1);
+        assert!(tabs[1].home && tabs[1].id == 2);
+        let (tabs, active) = restore_tabs(Vec::new());
+        assert_eq!((tabs.len(), active), (1, 0));
+    }
 
     /// Replays `drop_tab` on (id, pinned) pairs: remove, then insert at `drop_index`.
     fn drop(tabs: &[(u8, bool)], from: usize, at: usize, pin: bool) -> Vec<(u8, bool)> {
