@@ -141,10 +141,6 @@ impl AddressInput {
         cx.notify();
     }
 
-    pub fn set_placeholder(&mut self, text: &'static str) {
-        self.placeholder = text.into();
-    }
-
     pub fn text(&self) -> &str {
         &self.content
     }
