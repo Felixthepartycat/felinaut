@@ -82,6 +82,7 @@ hdiutil verify dist/Felifox-0.1-beta-macos-arm64.dmg
 - **Title-first address bar**: while you are not editing it, the address field shows the site's icon, the page title and the domain instead of the raw URL. Click it or press `⌘L` to get the full URL, selected for editing; clicking into the page ends the edit. **Theme ▾ → Address bar shows** switches between *Page title*, *Domain only* and *Full address*.
 - **History suggestions** while you type: a dropdown of previously visited pages, each with its icon, matched fuzzily against both title and URL; the first address containing your text is completed inline, and each row's × forgets that page. An empty address bar lists your most frecent pages (see below).
 - Tabs retain their own live webview and native navigation history when switched.
+- **Vertical tabs** in a collapsible sidebar (`⌘S`). Hover a tab and click its pin (or press `⌘D`) to pin it above the divider; pinned tabs are saved to `pinned.tsv` under Application Support and reopen their pinned URL on launch, loading when first selected. Closing a pinned tab unpins it.
 - Back, forward, reload and home; native page titles and URLs update the chrome.
 - Hovering web links displays their destination in the status bar; leaving clears it.
 - Cmd-click opens a link in a background tab; Cmd-Shift-click opens it in the foreground. New Tab quick links support the same modifiers.
@@ -99,6 +100,8 @@ hdiutil verify dist/Felifox-0.1-beta-macos-arm64.dmg
 | `⌘[` / `⌘]` | Back / forward               |
 | `⌘⇧H`       | Home                         |
 | `⌘⇧M`       | Mute / unmute active tab     |
+| `⌘S`        | Show / hide the tab sidebar  |
+| `⌘D`        | Pin / unpin active tab       |
 | `⌘Q`        | Quit                         |
 
 ### Title-first address bar and history suggestions
@@ -153,7 +156,7 @@ Every tab has its own volume, built in rather than added by an extension. Click 
 - **Tabs with sound** lists every tab that is playing or has custom settings; click a row to switch to it, or its speaker to mute it.
 - Keyboard while the popover is open: `←`/`→` (or `↓`/`↑`) adjust in 5 % steps below 100 % and 25 % steps above, `M` mutes, `0` resets, `Esc` closes.
 
-Tabs that are playing sound or muted show a speaker in the tab strip; clicking it toggles mute. The toolbar button shows the active tab's level or "Muted". Settings belong to the tab, survive navigation within it, and last for the session only.
+Tabs that are playing sound or muted show a speaker in the sidebar; clicking it toggles mute. The toolbar button shows the active tab's level or "Muted". Settings belong to the tab, survive navigation within it, and last for the session only.
 
 How it works: a document-start script (`src/audio_control.js`) runs in every frame. While a tab uses the default settings, it never touches page media. Once you change volume or sound, playing media is routed through Web Audio (EQ shelves, gain, and a limiter when boosting), and page-created `AudioContext`s feed the same chain. Native code only sends a validated gain and preset name, and pages report two booleans back, so the bridge exposes no new native capability.
 

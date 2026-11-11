@@ -8,6 +8,7 @@ mod engine;
 mod history;
 mod icons;
 mod input;
+mod pinned;
 mod suggestions;
 mod theme;
 mod volume;
@@ -52,7 +53,9 @@ actions!(
         Quit,
         AboutFelifox,
         VolumeControls,
-        MuteTab
+        MuteTab,
+        ToggleSidebar,
+        PinTab
     ]
 );
 
@@ -71,8 +74,20 @@ struct Tab {
     sound: PageSound,
     /// The last URL this tab added to history, so reloads and the URL poll don't count twice.
     recorded: String,
+    /// The URL a pinned tab reopens on launch. Pinned tabs come first in `Browser::tabs`.
+    pinned: Option<String>,
 }
 impl Tab {
+    /// A saved pinned tab; its page is created when it is first selected.
+    fn pinned(id: u64, url: String, title: String) -> Self {
+        Self {
+            title: if title.is_empty() { url.clone() } else { title },
+            url: url.clone(),
+            home: false,
+            pinned: Some(url),
+            ..Self::new(id)
+        }
+    }
     fn new(id: u64) -> Self {
         Self {
             id,
@@ -86,6 +101,7 @@ impl Tab {
             audio: TabAudio::default(),
             sound: PageSound::default(),
             recorded: String::new(),
+            pinned: None,
         }
     }
     /// Adds the current page to history once per URL per tab.
@@ -158,6 +174,9 @@ struct Browser {
     icons: RefCell<HashMap<String, Option<Arc<Image>>>>,
     /// Commands from the control socket; `None` unless started with `FELIFOX_AGENT=1`.
     agent: Option<agent::Queue>,
+    show_sidebar: bool,
+    /// `None` without a home, or when the file was unreadable so it is never overwritten.
+    pinned_path: Option<PathBuf>,
 }
 impl Browser {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -273,15 +292,35 @@ impl Browser {
                 {
                     eprintln!("Could not save browsing history: {error}");
                 }
+                // Titles may have changed since the last pin edit.
+                this.save_pinned();
             });
             true
         });
         let focus = cx.focus_handle();
         window.focus(&focus);
+        let mut pinned_path = pinned::default_path();
+        let saved = match pinned_path.as_deref().map(fs::read_to_string) {
+            Some(Ok(text)) => pinned::parse(&text),
+            Some(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Some(Err(error)) => {
+                eprintln!("Could not read pinned tabs: {error}");
+                pinned_path = None;
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
+        let mut tabs: Vec<Tab> = saved
+            .into_iter()
+            .zip(1..)
+            .map(|((url, title), id)| Tab::pinned(id, url, title))
+            .collect();
+        let next_id = tabs.len() as u64 + 1;
+        tabs.push(Tab::new(next_id));
         Self {
-            tabs: vec![Tab::new(1)],
-            active: 0,
-            next_id: 2,
+            active: tabs.len() - 1,
+            tabs,
+            next_id: next_id + 1,
             address,
             focus,
             _submit: subscription,
@@ -301,6 +340,69 @@ impl Browser {
                 .and_then(|path| path.parent().map(|dir| dir.join("icons"))),
             icons: RefCell::new(HashMap::new()),
             agent: agent::start(),
+            show_sidebar: true,
+            pinned_path,
+        }
+    }
+    fn pinned_count(&self) -> usize {
+        self.tabs
+            .iter()
+            .take_while(|tab| tab.pinned.is_some())
+            .count()
+    }
+    /// A tiny file written only on pin edits and quit, so it is written synchronously.
+    fn save_pinned(&self) {
+        let Some(path) = &self.pinned_path else {
+            return;
+        };
+        let contents = pinned::serialize(
+            self.tabs
+                .iter()
+                .filter_map(|tab| Some((tab.pinned.as_deref()?, tab.title.as_str()))),
+        );
+        if let Err(error) = history::write(path, &contents) {
+            eprintln!("Could not save pinned tabs: {error}");
+        }
+    }
+    /// Pins at the end of the pinned group, or unpins to the top of the other tabs.
+    fn toggle_pin_at(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.tabs[index].pinned.is_none() && self.tabs[index].url() == HOME {
+            return;
+        }
+        let active_id = self.tabs[self.active].id;
+        let mut tab = self.tabs.remove(index);
+        tab.pinned = match tab.pinned {
+            Some(_) => None,
+            None => Some(tab.url.clone()),
+        };
+        self.tabs.insert(self.pinned_count(), tab);
+        self.active = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == active_id)
+            .unwrap_or(0);
+        self.save_pinned();
+        cx.notify();
+    }
+    fn pin_tab(&mut self, _: &PinTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle_pin_at(self.active, cx);
+    }
+    fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_sidebar = !self.show_sidebar;
+        cx.notify();
+    }
+    /// Pinned tabs restored at launch have no page until they are first shown.
+    fn load_if_needed(&mut self, index: usize, window: &mut Window) {
+        let tab = &mut self.tabs[index];
+        if tab.page.is_some() || tab.home {
+            return;
+        }
+        match NativePage::new(window, &tab.url) {
+            Ok(page) => {
+                tab.page = Some(Rc::new(page));
+                tab.loading = true;
+            }
+            Err(error) => tab.error = Some(error),
         }
     }
     /// Runs one command from the control socket against the active tab.
@@ -820,6 +922,7 @@ impl Browser {
         }
         self.active = index;
         self.tabs[index].hovered_link = None;
+        self.load_if_needed(index, window);
         window.focus(&self.focus);
         self.sync_address(cx);
         cx.notify();
@@ -840,7 +943,9 @@ impl Browser {
             }
             window.focus(&self.focus);
         }
-        self.tabs.remove(index);
+        if self.tabs.remove(index).pinned.is_some() {
+            self.save_pinned();
+        }
         if self.tabs.is_empty() {
             self.tabs.push(Tab::new(self.next_id));
             self.next_id += 1;
@@ -849,6 +954,7 @@ impl Browser {
             self.active -= 1;
         }
         self.active = self.active.min(self.tabs.len() - 1);
+        self.load_if_needed(self.active, window);
         self.sync_address(cx);
         cx.notify();
     }
@@ -1146,6 +1252,175 @@ impl Browser {
             )
             .into_any_element()
     }
+    fn sidebar_button(&self, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
+        self.button("sidebar-toggle", "", p)
+            .on_click(
+                cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
+            )
+            .child(
+                brand::icon(brand::icon::SIDEBAR)
+                    .size(px(18.))
+                    .text_color(rgb(p.muted)),
+            )
+    }
+    fn tab_row(&self, index: usize, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
+        let tab = &self.tabs[index];
+        let selected = self.active == index;
+        let pinned = tab.pinned.is_some();
+        div()
+            .id(("tab", tab.id))
+            .group("tab-row")
+            .h(px(34.))
+            .w_full()
+            .flex_shrink_0()
+            .px_2()
+            .rounded_lg()
+            .bg(rgb(if selected { p.surface } else { p.background }))
+            .flex()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .hover(move |s| s.bg(rgb(p.elevated)))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.select_tab(index, window, cx);
+            }))
+            .child(
+                div()
+                    .text_color(rgb(if selected { p.primary } else { p.muted }))
+                    .child(if tab.loading && !tab.home {
+                        div().child("◌").into_any_element()
+                    } else if let Some(host) = (!tab.home).then(|| host(&tab.url)).flatten() {
+                        self.site_icon(&host, 16., p)
+                    } else {
+                        brand::symbol().size(px(18.)).into_any_element()
+                    }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_sm()
+                    .child(tab.display_title()),
+            )
+            .when(tab.sound.audible() || tab.audio.muted, |row| {
+                let id = tab.id;
+                let muted = tab.audio.muted;
+                row.child(
+                    div()
+                        .id(("tab-sound", id))
+                        .p_1()
+                        .rounded_md()
+                        .hover(move |s| s.bg(rgb(p.elevated)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_mute(id, cx);
+                        }))
+                        .child(
+                            brand::icon(volume::speaker_icon(tab.audio))
+                                .size(px(14.))
+                                .text_color(rgb(if muted { p.muted } else { p.primary })),
+                        ),
+                )
+            })
+            .when(pinned || tab.url() != HOME, |row| {
+                row.child(
+                    div()
+                        .id(("pin", tab.id))
+                        .p_1()
+                        .rounded_md()
+                        .opacity(0.)
+                        .group_hover("tab-row", |s| s.opacity(1.))
+                        .hover(move |s| s.bg(rgb(p.elevated)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_pin_at(index, cx);
+                        }))
+                        .child(
+                            brand::icon(brand::icon::PIN)
+                                .size(px(14.))
+                                .text_color(rgb(if pinned { p.primary } else { p.muted })),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .id(("close", tab.id))
+                    .text_color(rgb(p.muted))
+                    .px_1()
+                    .rounded_md()
+                    .hover(move |s| s.bg(rgb(p.elevated)).text_color(rgb(p.primary)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.close_tab_at(index, window, cx);
+                    }))
+                    .child("×"),
+            )
+    }
+    /// Arc-style vertical tabs: pinned tabs, then a divider, New Tab and the other tabs.
+    fn sidebar_view(&self, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
+        let pinned = self.pinned_count();
+        div()
+            .id("sidebar")
+            .w(px(240.))
+            .h_full()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(rgb(p.border))
+            .child(
+                // Leaves room for the traffic lights, level with the toolbar.
+                div()
+                    .h(px(64.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .px_3()
+                    .child(self.sidebar_button(p, cx)),
+            )
+            .child(
+                div()
+                    .id("tab-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_2()
+                    .pb_2()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .children((0..pinned).map(|index| self.tab_row(index, p, cx)))
+                    .when(pinned > 0, |list| {
+                        list.child(div().h(px(1.)).mx_2().my_1().bg(rgb(p.border)))
+                    })
+                    .child(
+                        div()
+                            .id("sidebar-new-tab")
+                            .h(px(34.))
+                            .flex_shrink_0()
+                            .px_2()
+                            .rounded_lg()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_sm()
+                            .text_color(rgb(p.muted))
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(rgb(p.elevated)).text_color(rgb(p.text)))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.new_tab(&NewTab, window, cx)
+                                }),
+                            )
+                            .child(div().w(px(18.)).flex().justify_center().child("+"))
+                            .child("New Tab"),
+                    )
+                    .children((pinned..self.tabs.len()).map(|index| self.tab_row(index, p, cx))),
+            )
+    }
     fn content(&self, cx: &mut Context<Self>) -> AnyElement {
         let tab = &self.tabs[self.active];
         if tab.home {
@@ -1196,7 +1471,6 @@ impl Render for Browser {
             .text_color(rgb(p.text))
             .font_family(".AppleSystemUIFont")
             .flex()
-            .flex_col()
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::focus_address))
@@ -1206,181 +1480,103 @@ impl Render for Browser {
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::mute_tab))
             .on_action(cx.listener(Self::volume_controls))
-            .child(
-                div()
-                    .h(px(52.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .pl(px(88.))
-                    .pr_4()
-                    .children(self.tabs.iter().enumerate().map(|(index, tab)| {
-                        let selected = self.active == index;
-                        div()
-                            .id(("tab", tab.id))
-                            .h(px(34.))
-                            .w(px(195.))
-                            .min_w(px(70.))
-                            .px_3()
-                            .rounded_lg()
-                            .bg(rgb(if selected { p.surface } else { p.background }))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .cursor_pointer()
-                            .hover(move |s| s.bg(rgb(p.elevated)))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.select_tab(index, window, cx);
-                            }))
-                            .child(
-                                div()
-                                    .text_color(rgb(if selected { p.primary } else { p.muted }))
-                                    .child(if tab.loading && !tab.home {
-                                        div().child("◌").into_any_element()
-                                    } else if let Some(host) =
-                                        (!tab.home).then(|| host(&tab.url)).flatten()
-                                    {
-                                        self.site_icon(&host, 16., p)
-                                    } else {
-                                        brand::symbol().size(px(18.)).into_any_element()
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .text_sm()
-                                    .child(tab.display_title()),
-                            )
-                            .when(tab.sound.audible() || tab.audio.muted, |row| {
-                                let id = tab.id;
-                                let muted = tab.audio.muted;
-                                row.child(
-                                    div()
-                                        .id(("tab-sound", id))
-                                        .p_1()
-                                        .rounded_md()
-                                        .hover(move |s| s.bg(rgb(p.elevated)))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.toggle_mute(id, cx);
-                                        }))
-                                        .child(
-                                            brand::icon(volume::speaker_icon(tab.audio))
-                                                .size(px(14.))
-                                                .text_color(rgb(if muted {
-                                                    p.muted
-                                                } else {
-                                                    p.primary
-                                                })),
-                                        ),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .id(("close", tab.id))
-                                    .text_color(rgb(p.muted))
-                                    .px_1()
-                                    .rounded_md()
-                                    .hover(move |s| {
-                                        s.bg(rgb(p.elevated)).text_color(rgb(p.primary))
-                                    })
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.close_tab_at(index, window, cx);
-                                    }))
-                                    .child("×"),
-                            )
-                    }))
-                    .child(self.button("new-tab", "+", p).on_click(
-                        cx.listener(|this, _, window, cx| this.new_tab(&NewTab, window, cx)),
-                    )),
-            )
-            .child(
-                div()
-                    .h(px(64.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .px_4()
-                    .gap_2()
-                    .bg(rgb(p.surface))
-                    .child(
-                        self.button("back", "←", p)
-                            .opacity(if back_enabled { 1. } else { 0.35 })
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.back(&Back, window, cx)),
-                            ),
-                    )
-                    .child(
-                        self.button("forward", "→", p)
-                            .opacity(if forward_enabled { 1. } else { 0.35 })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.forward(&Forward, window, cx)
-                            })),
-                    )
-                    .child(self.button("reload", "↻", p).on_click(
-                        cx.listener(|this, _, window, cx| this.reload(&Reload, window, cx)),
-                    ))
-                    .child(
-                        self.button("home", "⌂", p).on_click(
-                            cx.listener(|this, _, window, cx| this.home(&Home, window, cx)),
-                        ),
-                    )
-                    .child(div().flex_1().min_w_0().child(if show_chip {
-                        self.title_chip(display, p, cx)
-                    } else {
-                        self.address.clone().into_any_element()
-                    }))
-                    .child(self.volume_button(p, cx))
-                    .child(
-                        self.button("appearance", "◈ Theme ▾", p)
-                            .text_size(px(12.))
-                            .on_click(|_, window, cx| appearance::open(window, cx)),
-                    )
-                    .child(
-                        self.button("about", "ⓘ", p)
-                            .on_click(|_, _, cx| about::open(cx)),
-                    ),
-            )
-            .child(div().h(px(2.)).flex_shrink_0().bg(rgb(if tab.loading {
-                p.primary
-            } else {
-                p.border
-            })))
+            .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::pin_tab))
+            .when(self.show_sidebar, |root| {
+                root.child(self.sidebar_view(p, cx))
+            })
             .child(
                 div()
                     .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(self.content(cx)),
-            )
-            .child(
-                div()
-                    .h(px(30.))
-                    .flex_shrink_0()
-                    .px_4()
+                    .min_w_0()
+                    .h_full()
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_xs()
-                    .text_color(rgb(p.muted))
-                    .gap_4()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(64.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .px_4()
+                            .gap_2()
+                            .bg(rgb(p.surface))
+                            .when(!self.show_sidebar, |bar| {
+                                bar.pl(px(88.)).child(self.sidebar_button(p, cx))
+                            })
+                            .child(
+                                self.button("back", "←", p)
+                                    .opacity(if back_enabled { 1. } else { 0.35 })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.back(&Back, window, cx)
+                                    })),
+                            )
+                            .child(
+                                self.button("forward", "→", p)
+                                    .opacity(if forward_enabled { 1. } else { 0.35 })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.forward(&Forward, window, cx)
+                                    })),
+                            )
+                            .child(self.button("reload", "↻", p).on_click(
+                                cx.listener(|this, _, window, cx| this.reload(&Reload, window, cx)),
+                            ))
+                            .child(self.button("home", "⌂", p).on_click(
+                                cx.listener(|this, _, window, cx| this.home(&Home, window, cx)),
+                            ))
+                            .child(div().flex_1().min_w_0().child(if show_chip {
+                                self.title_chip(display, p, cx)
+                            } else {
+                                self.address.clone().into_any_element()
+                            }))
+                            .child(self.volume_button(p, cx))
+                            .child(
+                                self.button("appearance", "◈ Theme ▾", p)
+                                    .text_size(px(12.))
+                                    .on_click(|_, window, cx| appearance::open(window, cx)),
+                            )
+                            .child(
+                                self.button("about", "ⓘ", p)
+                                    .on_click(|_, _, cx| about::open(cx)),
+                            ),
+                    )
+                    .child(div().h(px(2.)).flex_shrink_0().bg(rgb(if tab.loading {
+                        p.primary
+                    } else {
+                        p.border
+                    })))
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_h_0()
                             .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(status.to_owned()),
+                            .child(self.content(cx)),
                     )
                     .child(
                         div()
+                            .h(px(30.))
                             .flex_shrink_0()
-                            .child(format!("FELIFOX  /  {DISPLAY_VERSION}")),
+                            .px_4()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .text_xs()
+                            .text_color(rgb(p.muted))
+                            .gap_4()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(status.to_owned()),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .child(format!("FELIFOX  /  {DISPLAY_VERSION}")),
+                            ),
                     ),
             )
     }
@@ -1414,6 +1610,8 @@ fn main() {
                 KeyBinding::new("cmd-shift-h", Home, None),
                 KeyBinding::new("cmd-q", Quit, None),
                 KeyBinding::new("cmd-shift-m", MuteTab, None),
+                KeyBinding::new("cmd-s", ToggleSidebar, None),
+                KeyBinding::new("cmd-d", PinTab, None),
             ]);
             // Native menu equivalents remain available while WKWebView owns keyboard focus.
             cx.set_menus(vec![
@@ -1430,6 +1628,7 @@ fn main() {
                     items: vec![
                         MenuItem::action("New Tab", NewTab),
                         MenuItem::action("Close Tab", CloseTab),
+                        MenuItem::action("Pin / Unpin Tab", PinTab),
                     ],
                 },
                 Menu {
@@ -1440,6 +1639,10 @@ fn main() {
                         MenuItem::os_action("Paste", input::Paste, OsAction::Paste),
                         MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
                     ],
+                },
+                Menu {
+                    name: "View".into(),
+                    items: vec![MenuItem::action("Toggle Sidebar", ToggleSidebar)],
                 },
                 Menu {
                     name: "Navigate".into(),
