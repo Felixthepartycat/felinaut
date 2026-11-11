@@ -31,14 +31,50 @@ use theme::{AddressDisplay, Palette, ThemeSettings};
 use webview::{Event, NativePage};
 
 const HOME: &str = "felifox://newtab";
-const SIDEBAR_WIDTH: f32 = 240.;
 const SIDEBAR_SLIDE: Duration = Duration::from_millis(200);
 /// The pointer within this many px of the window's left edge peeks a hidden sidebar…
 const PEEK_EDGE: f32 = 6.;
 /// …which stays until the pointer is this far past its right edge.
 const PEEK_MARGIN: f32 = 24.;
-/// Three tiles and two 8 px gaps fill the sidebar's 223 px list (minus its border and padding).
-const PINNED_TILE: f32 = 69.;
+
+/// A tab being dragged within the sidebar, by id.
+struct DraggedTab(u64);
+/// The sidebar's right edge being dragged to resize it.
+struct SidebarResize;
+/// What follows the pointer while dragging: a tab's title, or nothing for a resize.
+struct DragPreview(Option<(SharedString, Palette)>);
+impl Render for DragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().when_some(self.0.clone(), |preview, (title, p)| {
+            preview
+                .max_w(px(220.))
+                .px_3()
+                .py_1()
+                .rounded_lg()
+                .bg(rgb(p.elevated))
+                .border_1()
+                .border_color(rgb(p.border))
+                .text_sm()
+                .text_color(rgb(p.text))
+                .font_family(".AppleSystemUIFont")
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(title)
+        })
+    }
+}
+
+/// Where a dragged tab lands once it has been removed from the list. `target` is the index of
+/// the row it was dropped on (before removal): dragging down lands below that row, dragging up
+/// above it. The result is clamped into the tab's group so pinned tabs stay first.
+fn drop_index(target: usize, pin: bool, pinned: usize, len: usize) -> usize {
+    if pin {
+        target.min(pinned)
+    } else {
+        target.clamp(pinned, len)
+    }
+}
 
 /// The host of a web URL, which keys site icons and labels the title chip.
 pub fn host(url: &str) -> Option<String> {
@@ -200,6 +236,8 @@ struct Browser {
     sidebar_anim: Option<Instant>,
     /// A hidden sidebar shown because the pointer touched the window's left edge, like Arc.
     peek: bool,
+    /// Set when a tab drag starts; with an active drag it shows the pin drop zone.
+    dragging_tab: bool,
     /// `None` without a home, or when the file was unreadable so it is never overwritten.
     pinned_path: Option<PathBuf>,
 }
@@ -370,6 +408,7 @@ impl Browser {
             tab_scroll: ScrollHandle::new(),
             sidebar_anim: None,
             peek: false,
+            dragging_tab: false,
             pinned_path,
         }
     }
@@ -443,9 +482,10 @@ impl Browser {
             .is_window_active()
             .then(|| webview::pointer(window))
             .flatten();
+        let width = cx.global::<ThemeSettings>().sidebar_width;
         let peek = pointer.is_some_and(|at| {
             at.x <= if self.peek {
-                SIDEBAR_WIDTH + PEEK_MARGIN
+                width + PEEK_MARGIN
             } else {
                 PEEK_EDGE
             }
@@ -1460,7 +1500,7 @@ impl Browser {
         let selected = self.active == index;
         let id = tab.id;
         let hovered = self.hovered_tab == Some(id);
-        div()
+        let element = div()
             .id(("tab", id))
             .h(px(34.))
             .w_full()
@@ -1560,17 +1600,69 @@ impl Browser {
                         }))
                         .child("×"),
                 )
-            })
+            });
+        self.tab_drag(element, index, false, p, cx)
     }
-    /// Arc-style vertical tabs: pinned tabs, then a divider, New Tab and the other tabs.
-    /// The sidebar's current width: `SIDEBAR_WIDTH` or 0, eased in between while it slides.
+    /// Moves a dragged tab onto the row at `target`. Landing among the pinned tiles pins it,
+    /// among the other tabs unpins it; blank New Tabs cannot be pinned.
+    fn drop_tab(&mut self, id: u64, target: usize, pin: bool, cx: &mut Context<Self>) {
+        self.dragging_tab = false;
+        let Some(from) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return;
+        };
+        if pin && self.tabs[from].pinned.is_none() && self.tabs[from].url() == HOME {
+            return;
+        }
+        let active_id = self.tabs[self.active].id;
+        let mut tab = self.tabs.remove(from);
+        if pin != tab.pinned.is_some() {
+            tab.pinned = pin.then(|| tab.url.clone());
+        }
+        let to = drop_index(target, pin, self.pinned_count(), self.tabs.len());
+        self.tabs.insert(to, tab);
+        self.active = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == active_id)
+            .unwrap_or(0);
+        self.hovered_tab = None;
+        self.save_pinned();
+        cx.notify();
+    }
+    /// Makes a tab row or tile draggable and a drop target that takes its place.
+    fn tab_drag(
+        &self,
+        element: Stateful<Div>,
+        index: usize,
+        pin: bool,
+        p: Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let tab = &self.tabs[index];
+        let title = SharedString::from(tab.display_title());
+        let browser = cx.weak_entity();
+        element
+            .on_drag(DraggedTab(tab.id), move |_, _, _, cx| {
+                let _ = browser.update(cx, |this, cx| {
+                    this.dragging_tab = true;
+                    cx.notify();
+                });
+                cx.new(|_| DragPreview(Some((title.clone(), p))))
+            })
+            .drag_over::<DraggedTab>(move |style, _, _, _| style.border_color(rgb(p.primary)))
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                this.drop_tab(dragged.0, index, pin, cx);
+            }))
+    }
+    /// The sidebar's current width: its saved width or 0, eased in between while it slides.
     fn sidebar_width(&self, cx: &App) -> f32 {
         let shown = self.sidebar_shown(cx);
+        let full = cx.global::<ThemeSettings>().sidebar_width;
         let t = self.sidebar_anim.map_or(1., |start| {
             (start.elapsed().as_secs_f32() / SIDEBAR_SLIDE.as_secs_f32()).min(1.)
         });
         let eased = 1. - (1. - t).powi(3);
-        SIDEBAR_WIDTH * if shown { eased } else { 1. - eased }
+        full * if shown { eased } else { 1. - eased }
     }
     /// Arc-style pinned tile: the site icon centred in a square-ish card, three per row.
     fn pinned_tile(&self, index: usize, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -1578,68 +1670,76 @@ impl Browser {
         let selected = self.active == index;
         let id = tab.id;
         let hovered = self.hovered_tab == Some(id);
-        div()
-            .id(("pinned", id))
-            .relative()
-            .w(px(PINNED_TILE))
-            .h(px(46.))
-            .flex_shrink_0()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(if selected { p.border } else { p.surface }))
-            .bg(rgb(if selected { p.elevated } else { p.surface }))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .when(!selected, |tile| {
-                tile.hover(move |s| s.bg(rgb(p.elevated)).border_color(rgb(p.elevated)))
-            })
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if *hovered {
-                    this.hovered_tab = Some(id);
-                } else if this.hovered_tab == Some(id) {
-                    this.hovered_tab = None;
-                }
-                cx.notify();
-            }))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.select_tab(index, window, cx);
-            }))
-            .child(
-                div()
-                    .when(tab.loading, |icon| icon.opacity(0.5))
-                    .child(match host(&tab.url) {
+        // Three tiles and two 8 px gaps fill the grid: the width minus the sidebar border,
+        // the list padding and the grid's own drop-target border.
+        let tile = (cx.global::<ThemeSettings>().sidebar_width - 1. - 16. - 2. - 16.) / 3.;
+        let element =
+            div()
+                .id(("pinned", id))
+                .relative()
+                .w(px(tile))
+                .h(px(46.))
+                .flex_shrink_0()
+                .rounded_xl()
+                .border_1()
+                .border_color(rgb(if selected { p.border } else { p.surface }))
+                .bg(rgb(if selected { p.elevated } else { p.surface }))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .when(!selected, |tile| {
+                    tile.hover(move |s| s.bg(rgb(p.elevated)).border_color(rgb(p.elevated)))
+                })
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered {
+                        this.hovered_tab = Some(id);
+                    } else if this.hovered_tab == Some(id) {
+                        this.hovered_tab = None;
+                    }
+                    cx.notify();
+                }))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_tab(index, window, cx);
+                }))
+                .child(div().when(tab.loading, |icon| icon.opacity(0.5)).child(
+                    match host(&tab.url) {
                         Some(host) => self.site_icon(&host, 20., p),
                         None => brand::symbol().size(px(20.)).into_any_element(),
-                    }),
-            )
-            // Unpinning lives on hover; ⌘W on a selected tile frees its page, keeping the pin.
-            .when(hovered, |tile| {
-                tile.child(
-                    Self::row_control(("unpin", id), p)
-                        .absolute()
-                        .top(px(1.))
-                        .right(px(1.))
-                        .size(px(20.))
-                        .on_hover(Self::hint_on_hover("Unpin tab · ⌘D", cx))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.toggle_pin_at(index, cx);
-                        }))
-                        .child(
-                            brand::icon(brand::icon::PIN)
-                                .size(px(12.))
-                                .text_color(rgb(p.primary)),
-                        ),
-                )
-            })
+                    },
+                ))
+                // Unpinning lives on hover; ⌘W on a selected tile frees its page, keeping the pin.
+                .when(hovered, |tile| {
+                    tile.child(
+                        Self::row_control(("unpin", id), p)
+                            .absolute()
+                            .top(px(1.))
+                            .right(px(1.))
+                            .size(px(20.))
+                            .on_hover(Self::hint_on_hover("Unpin tab · ⌘D", cx))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.toggle_pin_at(index, cx);
+                            }))
+                            .child(
+                                brand::icon(brand::icon::PIN)
+                                    .size(px(12.))
+                                    .text_color(rgb(p.primary)),
+                            ),
+                    )
+                });
+        self.tab_drag(element, index, true, p, cx)
     }
+    /// Arc-style vertical tabs: pinned tiles, then New tab and the other tabs.
     fn sidebar_view(&self, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
         let pinned = self.pinned_count();
+        let tab_count = self.tabs.len();
+        // Dragging a tab with nothing pinned yet offers a place to pin it.
+        let pin_zone = pinned == 0 && self.dragging_tab && cx.has_active_drag();
         div()
             .id("sidebar")
-            .w(px(SIDEBAR_WIDTH))
+            .relative()
+            .w(px(cx.global::<ThemeSettings>().sidebar_width))
             .h_full()
             .flex_shrink_0()
             .flex()
@@ -1669,20 +1769,50 @@ impl Browser {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .when(pinned > 0, |list| {
+                    .when(pinned > 0 || pin_zone, |list| {
+                        // Dropping on the grid itself, not on a tile, pins at the end.
                         list.child(
                             div()
+                                .id("pinned-grid")
+                                .min_h(px(46.))
                                 .flex()
                                 .flex_wrap()
+                                .items_center()
                                 .gap_2()
-                                .pb_2()
+                                .mb_2()
+                                .rounded_xl()
+                                .border_1()
+                                .border_color(rgb(p.background))
+                                .drag_over::<DraggedTab>(move |style, _, _, _| {
+                                    style.border_color(rgb(p.primary))
+                                })
+                                .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                                    this.drop_tab(dragged.0, usize::MAX, true, cx);
+                                }))
+                                .when(pin_zone, |zone| {
+                                    zone.justify_center()
+                                        .border_color(rgb(p.border))
+                                        .text_xs()
+                                        .text_color(rgb(p.muted))
+                                        .child("Drop here to pin")
+                                })
                                 .children((0..pinned).map(|index| self.pinned_tile(index, p, cx))),
                         )
                     })
                     .child(
                         // An action, not a tab: no fill or icon tile, quieter text, its shortcut.
+                        // Dropping a tab here moves it to the top of the list (unpinning it).
                         div()
                             .id("sidebar-new-tab")
+                            .border_1()
+                            .border_color(rgb(p.background))
+                            .drag_over::<DraggedTab>(move |style, _, _, _| {
+                                style.border_color(rgb(p.primary))
+                            })
+                            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                                // 0 clamps to the first unpinned slot, counted after removal.
+                                this.drop_tab(dragged.0, 0, false, cx);
+                            }))
                             .h(px(30.))
                             .flex_shrink_0()
                             .px_2()
@@ -1710,7 +1840,27 @@ impl Browser {
                             .child(div().flex_1().child("New tab"))
                             .child("⌘T"),
                     )
-                    .children((pinned..self.tabs.len()).map(|index| self.tab_row(index, p, cx))),
+                    .children((pinned..tab_count).map(|index| self.tab_row(index, p, cx))),
+            )
+            .child(
+                // The right edge drags to resize; the width is saved when the drag ends.
+                div()
+                    .id("sidebar-resize")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right_0()
+                    .w(px(5.))
+                    .cursor_col_resize()
+                    .hover(move |s| s.bg(rgb(p.border)))
+                    .on_hover(Self::hint_on_hover("Drag to resize the sidebar", cx))
+                    .on_drag(SidebarResize, {
+                        let browser = cx.weak_entity();
+                        move |_, _, _, cx| {
+                            let _ = browser.update(cx, |this, _| this.dragging_tab = false);
+                            cx.new(|_| DragPreview(None))
+                        }
+                    }),
             )
     }
     fn content(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1807,6 +1957,21 @@ impl Render for Browser {
             .on_action(cx.listener(Self::activate_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
+            // Mouse drags stay with the GPUI view even over the native page, so the root
+            // follows a resize anywhere in the window and saves the width when it ends.
+            .on_drag_move(
+                cx.listener(|_, event: &DragMoveEvent<SidebarResize>, _, cx| {
+                    let width = f32::from(event.event.position.x)
+                        .clamp(theme::SIDEBAR_MIN, theme::SIDEBAR_MAX);
+                    cx.update_global::<ThemeSettings, _>(|settings, _| {
+                        settings.sidebar_width = width;
+                    });
+                    cx.notify();
+                }),
+            )
+            .on_drop(cx.listener(|_, _: &SidebarResize, _, cx| {
+                cx.global::<ThemeSettings>().save();
+            }))
             .when(sidebar_width > 0., |root| {
                 // A clipping frame slides; the sidebar inside keeps its width, so nothing reflows.
                 root.child(
@@ -2043,4 +2208,52 @@ fn main() {
             .expect("Could not open Felifox window");
             cx.activate(true);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drop_index;
+
+    /// Replays `drop_tab` on pinned flags and ids: remove, then insert at `drop_index`.
+    fn drop(tabs: &[(u8, bool)], from: usize, target: usize, pin: bool) -> Vec<(u8, bool)> {
+        let mut tabs = tabs.to_vec();
+        let (id, _) = tabs.remove(from);
+        let pinned = tabs.iter().take_while(|(_, p)| *p).count();
+        let to = drop_index(target, pin, pinned, tabs.len());
+        tabs.insert(to, (id, pin));
+        tabs
+    }
+
+    #[test]
+    fn reorders_within_and_across_groups() {
+        let tabs = [(1, true), (2, true), (3, false), (4, false), (5, false)];
+        // Down lands below the target row, up lands above it.
+        assert_eq!(
+            drop(&tabs, 2, 4, false),
+            [(1, true), (2, true), (4, false), (5, false), (3, false)]
+        );
+        assert_eq!(
+            drop(&tabs, 4, 2, false),
+            [(1, true), (2, true), (5, false), (3, false), (4, false)]
+        );
+        // Onto a tile pins; onto a row unpins; the grid itself pins at the end.
+        assert_eq!(
+            drop(&tabs, 4, 0, true),
+            [(5, true), (1, true), (2, true), (3, false), (4, false)]
+        );
+        assert_eq!(
+            drop(&tabs, 0, 3, false),
+            [(2, true), (3, false), (4, false), (1, false), (5, false)]
+        );
+        assert_eq!(
+            drop(&tabs, 3, usize::MAX, true),
+            [(1, true), (2, true), (4, true), (3, false), (5, false)]
+        );
+        // The New tab row (target 0, unpinned) puts it at the top of the other tabs.
+        assert_eq!(
+            drop(&tabs, 0, 0, false),
+            [(2, true), (1, false), (3, false), (4, false), (5, false)]
+        );
+        assert_eq!(drop(&tabs, 4, 0, false)[2], (5, false));
+    }
 }
