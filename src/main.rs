@@ -1275,12 +1275,13 @@ impl Browser {
             .flex_shrink_0()
             .px_2()
             .rounded_lg()
-            .bg(rgb(if selected { p.surface } else { p.background }))
+            // Selection is the strongest fill; hover only hints, and never on the selected row.
+            .bg(rgb(if selected { p.elevated } else { p.background }))
             .flex()
             .items_center()
             .gap_2()
             .cursor_pointer()
-            .hover(move |s| s.bg(rgb(p.elevated)))
+            .when(!selected, |row| row.hover(move |s| s.bg(rgb(p.surface))))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.select_tab(index, window, cx);
             }))
