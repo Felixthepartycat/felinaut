@@ -402,6 +402,35 @@ fn native_key(key: &str) -> Option<(u16, String)> {
     Some((code, character.to_string()))
 }
 
+/// The pointer in the window's content, top-left origin, or `None` outside it. Read from AppKit
+/// because GPUI hears no mouse moves while the pointer is over a native page.
+#[cfg(target_os = "macos")]
+pub fn pointer(window: &gpui::Window) -> Option<gpui::Point<f32>> {
+    use objc2_app_kit::NSView;
+    use wry::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    // Fully qualified: `Window` has an inherent `window_handle` returning GPUI's own handle.
+    let RawWindowHandle::AppKit(handle) = HasWindowHandle::window_handle(window).ok()?.as_raw()
+    else {
+        return None;
+    };
+    // SAFETY: GPUI hands out its live content view, and we are on the main thread.
+    let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+    let location = view.window()?.mouseLocationOutsideOfEventStream();
+    let point = view.convertPoint_fromView(location, None);
+    let size = view.bounds().size;
+    let y = if view.isFlipped() {
+        point.y
+    } else {
+        size.height - point.y
+    };
+    ((0.0..=size.width).contains(&point.x) && (0.0..=size.height).contains(&y))
+        .then(|| gpui::point(point.x as f32, y as f32))
+}
+#[cfg(not(target_os = "macos"))]
+pub fn pointer(_: &gpui::Window) -> Option<gpui::Point<f32>> {
+    None
+}
+
 fn allowed_url(url: &str) -> bool {
     url.split_once(':').is_some_and(|(scheme, _)| {
         scheme.eq_ignore_ascii_case("http")

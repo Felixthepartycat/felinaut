@@ -33,6 +33,10 @@ use webview::{Event, NativePage};
 const HOME: &str = "felifox://newtab";
 const SIDEBAR_WIDTH: f32 = 240.;
 const SIDEBAR_SLIDE: Duration = Duration::from_millis(200);
+/// The pointer within this many px of the window's left edge peeks a hidden sidebar…
+const PEEK_EDGE: f32 = 6.;
+/// …which stays until the pointer is this far past its right edge.
+const PEEK_MARGIN: f32 = 24.;
 /// Three tiles and two 8 px gaps fill the sidebar's 223 px list (minus its border and padding).
 const PINNED_TILE: f32 = 69.;
 
@@ -194,6 +198,8 @@ struct Browser {
     tab_scroll: ScrollHandle,
     /// When the sidebar last started sliding; `None` once settled or with motion reduced.
     sidebar_anim: Option<Instant>,
+    /// A hidden sidebar shown because the pointer touched the window's left edge, like Arc.
+    peek: bool,
     /// `None` without a home, or when the file was unreadable so it is never overwritten.
     pinned_path: Option<PathBuf>,
 }
@@ -363,6 +369,7 @@ impl Browser {
             hovered_tab: None,
             tab_scroll: ScrollHandle::new(),
             sidebar_anim: None,
+            peek: false,
             pinned_path,
         }
     }
@@ -411,8 +418,11 @@ impl Browser {
         self.toggle_pin_at(self.active, cx);
     }
     /// Saved with the other settings, so the sidebar stays collapsed across launches.
-    fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
-        self.hint = None;
+    fn sidebar_shown(&self, cx: &App) -> bool {
+        cx.global::<ThemeSettings>().sidebar || self.peek
+    }
+    /// Starts a slide toward the opposite of the current state; call before flipping it.
+    fn start_slide(&mut self, cx: &App) {
         self.sidebar_anim = theme::motion_allowed(cx).then(|| {
             // Reversing mid-slide continues from the current width instead of jumping.
             let left = SIDEBAR_SLIDE.saturating_sub(
@@ -421,6 +431,38 @@ impl Browser {
             );
             Instant::now() - left
         });
+    }
+    /// Peeks the hidden sidebar while the pointer is at the window's left edge, and hides it
+    /// again once the pointer moves past it or leaves the window.
+    fn update_peek(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if cx.global::<ThemeSettings>().sidebar {
+            self.peek = false;
+            return;
+        }
+        let pointer = window
+            .is_window_active()
+            .then(|| webview::pointer(window))
+            .flatten();
+        let peek = pointer.is_some_and(|at| {
+            at.x <= if self.peek {
+                SIDEBAR_WIDTH + PEEK_MARGIN
+            } else {
+                PEEK_EDGE
+            }
+        });
+        if peek != self.peek {
+            self.start_slide(cx);
+            self.peek = peek;
+            cx.notify();
+        }
+    }
+    fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        self.hint = None;
+        // ⌘S during a peek keeps the already visible sidebar open: no slide.
+        if !self.peek {
+            self.start_slide(cx);
+        }
+        self.peek = false;
         cx.update_global::<ThemeSettings, _>(|settings, _| {
             settings.sidebar = !settings.sidebar;
             settings.save();
@@ -851,6 +893,7 @@ impl Browser {
         for (url, png) in icons {
             self.store_icon(&url, png, cx);
         }
+        self.update_peek(window, cx);
         self.flush_history(cx);
         if changed {
             cx.notify();
@@ -1398,6 +1441,8 @@ impl Browser {
             .on_hover(Self::hint_on_hover(
                 if cx.global::<ThemeSettings>().sidebar {
                     "Hide sidebar · ⌘S"
+                } else if self.peek {
+                    "Keep sidebar open · ⌘S"
                 } else {
                     "Show sidebar · ⌘S"
                 },
@@ -1520,7 +1565,7 @@ impl Browser {
     /// Arc-style vertical tabs: pinned tabs, then a divider, New Tab and the other tabs.
     /// The sidebar's current width: `SIDEBAR_WIDTH` or 0, eased in between while it slides.
     fn sidebar_width(&self, cx: &App) -> f32 {
-        let shown = cx.global::<ThemeSettings>().sidebar;
+        let shown = self.sidebar_shown(cx);
         let t = self.sidebar_anim.map_or(1., |start| {
             (start.elapsed().as_secs_f32() / SIDEBAR_SLIDE.as_secs_f32()).min(1.)
         });
