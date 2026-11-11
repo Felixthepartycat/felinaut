@@ -175,6 +175,11 @@ struct Browser {
     /// Commands from the control socket; `None` unless started with `FELIFOX_AGENT=1`.
     agent: Option<agent::Queue>,
     show_sidebar: bool,
+    /// What the hovered sidebar control does, shown in the status bar. GPUI tooltips would
+    /// draw underneath the native page, so the status bar carries them instead.
+    hint: Option<&'static str>,
+    /// The sidebar row under the pointer; it reveals the pin and fills the status bar.
+    hovered_tab: Option<u64>,
     /// `None` without a home, or when the file was unreadable so it is never overwritten.
     pinned_path: Option<PathBuf>,
 }
@@ -341,6 +346,8 @@ impl Browser {
             icons: RefCell::new(HashMap::new()),
             agent: agent::start(),
             show_sidebar: true,
+            hint: None,
+            hovered_tab: None,
             pinned_path,
         }
     }
@@ -369,6 +376,7 @@ impl Browser {
         if self.tabs[index].pinned.is_none() && self.tabs[index].url() == HOME {
             return;
         }
+        self.hint = None;
         let active_id = self.tabs[self.active].id;
         let mut tab = self.tabs.remove(index);
         tab.pinned = match tab.pinned {
@@ -937,15 +945,19 @@ impl Browser {
         self.close_tab_at(self.active, window, cx);
     }
     fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.hint = None;
+        self.hovered_tab = None;
         if index == self.active {
             if let Some(page) = &self.tabs[index].page {
                 let _ = page.focus_parent();
             }
             window.focus(&self.focus);
         }
-        if self.tabs.remove(index).pinned.is_some() {
-            self.save_pinned();
+        if let Some(url) = self.tabs[index].pinned.clone() {
+            self.unload_pinned(index, url, window, cx);
+            return;
         }
+        self.tabs.remove(index);
         if self.tabs.is_empty() {
             self.tabs.push(Tab::new(self.next_id));
             self.next_id += 1;
@@ -1252,11 +1264,74 @@ impl Browser {
             )
             .into_any_element()
     }
+    /// Closing a pinned tab frees its page and resets it to the pinned URL; the pin stays.
+    fn unload_pinned(
+        &mut self,
+        index: usize,
+        url: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = &mut self.tabs[index];
+        if let Some(page) = tab.page.take() {
+            let _ = page.set_visible(false);
+        }
+        *tab = Tab::pinned(tab.id, url, std::mem::take(&mut tab.title));
+        if index == self.active {
+            if self.tabs.len() == 1 {
+                self.tabs.push(Tab::new(self.next_id));
+                self.next_id += 1;
+            }
+            let next = if index + 1 < self.tabs.len() {
+                index + 1
+            } else {
+                index - 1
+            };
+            self.select_tab(next, window, cx);
+        }
+        cx.notify();
+    }
+    /// Shows `text` in the status bar while the element is hovered.
+    fn hint_on_hover(
+        text: &'static str,
+        cx: &mut Context<Self>,
+    ) -> impl Fn(&bool, &mut Window, &mut App) + 'static {
+        cx.listener(move |this, hovered: &bool, _, cx| {
+            if *hovered {
+                this.hint = Some(text);
+            } else if this.hint == Some(text) {
+                this.hint = None;
+            }
+            cx.notify();
+        })
+    }
+    /// A 24 × 24 icon control inside a tab row.
+    fn row_control(id: (&'static str, u64), p: Palette) -> Stateful<Div> {
+        div()
+            .id(id)
+            .size(px(24.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .text_color(rgb(p.muted))
+            // `border` differs from both the selected and the hovered row fill in every theme.
+            .hover(move |s| s.bg(rgb(p.border)).text_color(rgb(p.text)))
+    }
     fn sidebar_button(&self, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
         self.button("sidebar-toggle", "", p)
             .on_click(
                 cx.listener(|this, _, window, cx| this.toggle_sidebar(&ToggleSidebar, window, cx)),
             )
+            .on_hover(Self::hint_on_hover(
+                if self.show_sidebar {
+                    "Hide sidebar · ⌘S"
+                } else {
+                    "Show sidebar · ⌘S"
+                },
+                cx,
+            ))
             .child(
                 brand::icon(brand::icon::SIDEBAR)
                     .size(px(18.))
@@ -1267,9 +1342,10 @@ impl Browser {
         let tab = &self.tabs[index];
         let selected = self.active == index;
         let pinned = tab.pinned.is_some();
+        let id = tab.id;
+        let hovered = self.hovered_tab == Some(id);
         div()
-            .id(("tab", tab.id))
-            .group("tab-row")
+            .id(("tab", id))
             .h(px(34.))
             .w_full()
             .flex_shrink_0()
@@ -1282,6 +1358,14 @@ impl Browser {
             .gap_2()
             .cursor_pointer()
             .when(!selected, |row| row.hover(move |s| s.bg(rgb(p.surface))))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.hovered_tab = Some(id);
+                } else if this.hovered_tab == Some(id) {
+                    this.hovered_tab = None;
+                }
+                cx.notify();
+            }))
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.select_tab(index, window, cx);
             }))
@@ -1306,14 +1390,17 @@ impl Browser {
                     .child(tab.display_title()),
             )
             .when(tab.sound.audible() || tab.audio.muted, |row| {
-                let id = tab.id;
                 let muted = tab.audio.muted;
                 row.child(
-                    div()
-                        .id(("tab-sound", id))
-                        .p_1()
-                        .rounded_md()
-                        .hover(move |s| s.bg(rgb(p.elevated)))
+                    Self::row_control(("tab-sound", id), p)
+                        .on_hover(Self::hint_on_hover(
+                            if muted {
+                                "Unmute tab · ⌘⇧M"
+                            } else {
+                                "Mute tab · ⌘⇧M"
+                            },
+                            cx,
+                        ))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.toggle_mute(id, cx);
@@ -1325,15 +1412,18 @@ impl Browser {
                         ),
                 )
             })
-            .when(pinned || tab.url() != HOME, |row| {
+            // Only rendered while hovered, so a hidden pin can never catch a click.
+            .when(hovered && (pinned || tab.url() != HOME), |row| {
                 row.child(
-                    div()
-                        .id(("pin", tab.id))
-                        .p_1()
-                        .rounded_md()
-                        .opacity(0.)
-                        .group_hover("tab-row", |s| s.opacity(1.))
-                        .hover(move |s| s.bg(rgb(p.elevated)))
+                    Self::row_control(("pin", id), p)
+                        .on_hover(Self::hint_on_hover(
+                            if pinned {
+                                "Unpin tab · ⌘D"
+                            } else {
+                                "Pin tab · ⌘D"
+                            },
+                            cx,
+                        ))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.toggle_pin_at(index, cx);
@@ -1346,12 +1436,15 @@ impl Browser {
                 )
             })
             .child(
-                div()
-                    .id(("close", tab.id))
-                    .text_color(rgb(p.muted))
-                    .px_1()
-                    .rounded_md()
-                    .hover(move |s| s.bg(rgb(p.elevated)).text_color(rgb(p.primary)))
+                Self::row_control(("close", id), p)
+                    .on_hover(Self::hint_on_hover(
+                        if pinned {
+                            "Close tab, keep it pinned · ⌘W"
+                        } else {
+                            "Close tab · ⌘W"
+                        },
+                        cx,
+                    ))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.close_tab_at(index, window, cx);
@@ -1454,14 +1547,32 @@ impl Render for Browser {
         let show_chip = !tab.home && !address_focused && display != AddressDisplay::Url;
         let back_enabled = tab.can_go_back();
         let forward_enabled = tab.can_go_forward();
-        let status = tab
-            .hovered_link
-            .as_deref()
-            .or(tab.error.as_deref())
-            .unwrap_or(if tab.loading && !tab.home {
-                "Loading · WebKit"
-            } else {
-                "WebKit · JavaScript enabled"
+        // A hovered sidebar row shows its full title and address, which the row truncates.
+        let hovered_row = self
+            .hovered_tab
+            .and_then(|id| self.tabs.iter().find(|tab| tab.id == id))
+            .filter(|tab| !tab.home)
+            .map(|tab| {
+                format!(
+                    "{} · {}",
+                    tab.display_title(),
+                    history::display_url(&tab.url)
+                )
+            });
+        let status = self
+            .hint
+            .map(str::to_owned)
+            .or(hovered_row)
+            .unwrap_or_else(|| {
+                tab.hovered_link
+                    .as_deref()
+                    .or(tab.error.as_deref())
+                    .unwrap_or(if tab.loading && !tab.home {
+                        "Loading · WebKit"
+                    } else {
+                        "WebKit · JavaScript enabled"
+                    })
+                    .to_owned()
             });
         div()
             .id("felifox")
@@ -1571,7 +1682,7 @@ impl Render for Browser {
                                     .overflow_hidden()
                                     .text_ellipsis()
                                     .whitespace_nowrap()
-                                    .child(status.to_owned()),
+                                    .child(status),
                             )
                             .child(
                                 div()
