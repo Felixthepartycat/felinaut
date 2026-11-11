@@ -95,6 +95,7 @@ hdiutil verify dist/Felifox-0.1-beta-macos-arm64.dmg
 | ----------- | ---------------------------- |
 | `⌘T`        | New tab                      |
 | `⌘W`        | Close active tab             |
+| `⌘⇧T`       | Reopen the last closed tab (back in its split view if possible) |
 | `⌘L`        | Focus address and select all |
 | `⌘R`        | Reload                       |
 | `⌘[` / `⌘]` | Back / forward               |

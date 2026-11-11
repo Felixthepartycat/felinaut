@@ -218,9 +218,18 @@ actions!(
         ToggleSidebar,
         PinTab,
         NextTab,
-        PreviousTab
+        PreviousTab,
+        ReopenTab
     ]
 );
+
+/// What ⌘⇧T needs to bring a closed tab back where it was.
+struct ClosedTab {
+    url: String,
+    title: String,
+    index: usize,
+    partner: Option<u64>,
+}
 
 /// ⌘1–⌘8 select that tab in sidebar order; `LAST_TAB` (⌘9) selects the last one.
 #[derive(Clone, PartialEq, Action)]
@@ -365,6 +374,8 @@ struct Browser {
     menu: Option<TabMenu>,
     /// Focus for the menu, so Escape closes it.
     menu_focus: FocusHandle,
+    /// Recently closed tabs, newest last, for ⌘⇧T.
+    closed: Vec<ClosedTab>,
     /// `None` without a home, or when the file was unreadable so it is never overwritten.
     pinned_path: Option<PathBuf>,
 }
@@ -539,6 +550,7 @@ impl Browser {
             drop_hint: None,
             menu: None,
             menu_focus: cx.focus_handle(),
+            closed: Vec::new(),
             pinned_path,
         }
     }
@@ -1430,6 +1442,47 @@ impl Browser {
     fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         self.close_tab_at(self.active, window, cx);
     }
+    /// Reopens the most recently closed tab where it was, back in its split view when the
+    /// other half is still open and free.
+    fn reopen_tab(&mut self, _: &ReopenTab, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(closed) = self.closed.pop() else {
+            return;
+        };
+        let page = match NativePage::new(window, &closed.url) {
+            Ok(page) => Rc::new(page),
+            Err(error) => {
+                self.tabs[self.active].error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let mut tab = Tab::new(self.next_id);
+        self.next_id += 1;
+        let id = tab.id;
+        tab.url = closed.url;
+        tab.title = closed.title;
+        tab.home = false;
+        tab.loading = true;
+        tab.page = Some(page);
+        // Back among the unpinned tabs, never between the two halves of a split view.
+        let pinned = self.pinned_count();
+        let mut at = closed.index.clamp(pinned, self.tabs.len());
+        if at < self.tabs.len() && at > 0 && self.partner(at) == Some(at - 1) {
+            at += 1;
+        }
+        self.tabs.insert(at, tab);
+        if self.active >= at {
+            self.active += 1;
+        }
+        let partner = closed
+            .partner
+            .and_then(|partner| self.tabs.iter().position(|tab| tab.id == partner))
+            .filter(|&index| self.tabs[index].split.is_none() && self.tabs[index].pinned.is_none());
+        match partner {
+            Some(index) => self.split_tabs(id, index, window, cx),
+            None => self.select_tab(at, window, cx),
+        }
+    }
     fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.hint = None;
         self.hovered_tab = None;
@@ -1442,6 +1495,19 @@ impl Browser {
         if let Some(url) = self.tabs[index].pinned.clone() {
             self.unload_pinned(index, url, window, cx);
             return;
+        }
+        let tab = &self.tabs[index];
+        if !tab.home && tab.page.is_some() {
+            // shortcut: session-only and capped at 20; persist it if restoring after quit matters.
+            if self.closed.len() == 20 {
+                self.closed.remove(0);
+            }
+            self.closed.push(ClosedTab {
+                url: tab.url.clone(),
+                title: tab.title.clone(),
+                index,
+                partner: tab.split,
+            });
         }
         self.unsplit(index);
         self.tabs.remove(index);
@@ -2492,6 +2558,7 @@ impl Render for Browser {
             .on_action(cx.listener(Self::activate_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
+            .on_action(cx.listener(Self::reopen_tab))
             // Mouse drags stay with the GPUI view even over the native page, so the root
             // follows a resize anywhere in the window and saves the width when it ends.
             .on_drag_move(
@@ -2646,6 +2713,7 @@ fn main() {
                 KeyBinding::new("cmd-shift-m", MuteTab, None),
                 KeyBinding::new("cmd-s", ToggleSidebar, None),
                 KeyBinding::new("cmd-d", PinTab, None),
+                KeyBinding::new("cmd-shift-t", ReopenTab, None),
                 KeyBinding::new("ctrl-tab", NextTab, None),
                 KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
                 KeyBinding::new("cmd-shift-]", NextTab, None),
@@ -2670,6 +2738,7 @@ fn main() {
                     items: vec![
                         MenuItem::action("New Tab", NewTab),
                         MenuItem::action("Close Tab", CloseTab),
+                        MenuItem::action("Reopen Closed Tab", ReopenTab),
                         MenuItem::action("Pin / Unpin Tab", PinTab),
                     ],
                 },
