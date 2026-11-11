@@ -32,6 +32,13 @@ use webview::{Event, NativePage};
 
 const HOME: &str = "felifox://newtab";
 const SIDEBAR_SLIDE: Duration = Duration::from_millis(200);
+/// AppKit only hovers and clicks the traffic lights inside its title bar view (32 pt on this
+/// macOS), so the 14 pt buttons must start at most 18 pt down or they go half dead.
+/// shortcut: 28 pt title bars (older macOS) still clip 4 pt; measure it at runtime if testers
+/// report it.
+const TRAFFIC_LIGHT_Y: f32 = 18.;
+/// The sidebar header and toolbar height, centring them on the traffic lights.
+const CHROME_ROW: f32 = 2. * (TRAFFIC_LIGHT_Y + 7.);
 /// The pointer within this many px of the window's left edge peeks a hidden sidebar…
 const PEEK_EDGE: f32 = 6.;
 /// …which stays until the pointer is this far past its right edge.
@@ -2027,7 +2034,7 @@ impl Browser {
             .child(
                 // Leaves room for the traffic lights, level with the toolbar.
                 div()
-                    .h(px(64.))
+                    .h(px(CHROME_ROW))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -2318,7 +2325,7 @@ impl Render for Browser {
                     .flex_col()
                     .child(
                         div()
-                            .h(px(64.))
+                            .h(px(CHROME_ROW))
                             .flex_shrink_0()
                             .flex()
                             .items_center()
@@ -2524,8 +2531,7 @@ fn main() {
                     titlebar: Some(TitlebarOptions {
                         title: Some("Felifox".into()),
                         appears_transparent: true,
-                        // Centred on the 64 px sidebar header and toolbar rows.
-                        traffic_light_position: Some(point(px(16.), px(25.))),
+                        traffic_light_position: Some(point(px(16.), px(TRAFFIC_LIGHT_Y))),
                     }),
                     ..Default::default()
                 },
