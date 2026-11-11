@@ -32,6 +32,7 @@ use webview::{Event, NativePage};
 
 const HOME: &str = "felifox://newtab";
 const SIDEBAR_WIDTH: f32 = 240.;
+const SIDEBAR_SLIDE: Duration = Duration::from_millis(200);
 /// Three tiles and two 8 px gaps fill the sidebar's 223 px list (minus its border and padding).
 const PINNED_TILE: f32 = 69.;
 
@@ -191,6 +192,8 @@ struct Browser {
     /// The sidebar row under the pointer; it reveals the pin and fills the status bar.
     hovered_tab: Option<u64>,
     tab_scroll: ScrollHandle,
+    /// When the sidebar last started sliding; `None` once settled or with motion reduced.
+    sidebar_anim: Option<Instant>,
     /// `None` without a home, or when the file was unreadable so it is never overwritten.
     pinned_path: Option<PathBuf>,
 }
@@ -359,6 +362,7 @@ impl Browser {
             hint: None,
             hovered_tab: None,
             tab_scroll: ScrollHandle::new(),
+            sidebar_anim: None,
             pinned_path,
         }
     }
@@ -409,6 +413,14 @@ impl Browser {
     /// Saved with the other settings, so the sidebar stays collapsed across launches.
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
         self.hint = None;
+        self.sidebar_anim = theme::motion_allowed(cx).then(|| {
+            // Reversing mid-slide continues from the current width instead of jumping.
+            let left = SIDEBAR_SLIDE.saturating_sub(
+                self.sidebar_anim
+                    .map_or(SIDEBAR_SLIDE, |start| start.elapsed()),
+            );
+            Instant::now() - left
+        });
         cx.update_global::<ThemeSettings, _>(|settings, _| {
             settings.sidebar = !settings.sidebar;
             settings.save();
@@ -1505,6 +1517,16 @@ impl Browser {
                 )
             })
     }
+    /// Arc-style vertical tabs: pinned tabs, then a divider, New Tab and the other tabs.
+    /// The sidebar's current width: `SIDEBAR_WIDTH` or 0, eased in between while it slides.
+    fn sidebar_width(&self, cx: &App) -> f32 {
+        let shown = cx.global::<ThemeSettings>().sidebar;
+        let t = self.sidebar_anim.map_or(1., |start| {
+            (start.elapsed().as_secs_f32() / SIDEBAR_SLIDE.as_secs_f32()).min(1.)
+        });
+        let eased = 1. - (1. - t).powi(3);
+        SIDEBAR_WIDTH * if shown { eased } else { 1. - eased }
+    }
     /// Arc-style pinned tile: the site icon centred in a square-ish card, three per row.
     fn pinned_tile(&self, index: usize, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
         let tab = &self.tabs[index];
@@ -1568,7 +1590,6 @@ impl Browser {
                 )
             })
     }
-    /// Arc-style vertical tabs: pinned tiles, then New tab and the other tabs.
     fn sidebar_view(&self, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
         let pinned = self.pinned_count();
         div()
@@ -1675,7 +1696,18 @@ impl Render for Browser {
         let p = theme::palette(cx);
         let address_focused = self.address.read(cx).focus_handle(cx).is_focused(window);
         let display = cx.global::<ThemeSettings>().address;
-        let show_sidebar = cx.global::<ThemeSettings>().sidebar;
+        let sidebar_width = self.sidebar_width(cx);
+        if self
+            .sidebar_anim
+            .is_some_and(|start| start.elapsed() < SIDEBAR_SLIDE)
+        {
+            window.request_animation_frame();
+        } else {
+            self.sidebar_anim = None;
+        }
+        // The traffic lights cover the window's first 88 px; once the sidebar is narrower than
+        // that, the toolbar carries the toggle just right of them.
+        let toolbar_toggle = sidebar_width < 88.;
         let tab = &self.tabs[self.active];
         let show_chip = !tab.home && !address_focused && display != AddressDisplay::Url;
         let back_enabled = tab.can_go_back();
@@ -1730,7 +1762,17 @@ impl Render for Browser {
             .on_action(cx.listener(Self::activate_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
-            .when(show_sidebar, |root| root.child(self.sidebar_view(p, cx)))
+            .when(sidebar_width > 0., |root| {
+                // A clipping frame slides; the sidebar inside keeps its width, so nothing reflows.
+                root.child(
+                    div()
+                        .w(px(sidebar_width))
+                        .h_full()
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .child(self.sidebar_view(p, cx)),
+                )
+            })
             .child(
                 div()
                     .flex_1()
@@ -1747,9 +1789,9 @@ impl Render for Browser {
                             .px_4()
                             .gap_2()
                             .bg(rgb(p.surface))
-                            // The traffic lights sit over the toolbar while the sidebar is hidden.
-                            .when(!show_sidebar, |bar| {
-                                bar.pl(px(88.)).child(self.sidebar_button(p, cx))
+                            .when(toolbar_toggle, |bar| {
+                                bar.pl(px((88. - sidebar_width).max(16.)))
+                                    .child(self.sidebar_button(p, cx))
                             })
                             .child(
                                 self.button("back", "←", p)
