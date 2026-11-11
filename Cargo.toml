@@ -17,7 +17,8 @@ unicode-segmentation = "1.12"
 serde_json = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Already used by Wry; read the live native Reduce Motion setting without polling a subprocess.
+# Already used by Wry; read the live native Reduce Motion setting without polling a subprocess,
+# and the pointer position while it is over a native page (sidebar edge peek).
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSWorkspace",
     "NSAccessibility",

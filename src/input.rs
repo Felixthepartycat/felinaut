@@ -784,7 +784,8 @@ impl Render for AddressInput {
             .line_height(px(24.))
             .text_size(px(14.))
             .px_3()
-            .py_2()
+            // 24 + 2 × 4 + border = 34 pt, matching the toolbar buttons and the title chip.
+            .py(px(4.))
             .overflow_hidden()
             .child(TextElement { input: cx.entity() })
     }

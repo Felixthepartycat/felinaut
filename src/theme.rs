@@ -176,7 +176,14 @@ pub struct ThemeSettings {
     /// Preference, additionally constrained by macOS Reduce Motion.
     pub animate: bool,
     pub address: AddressDisplay,
+    /// Whether the vertical tab sidebar is shown (⌘S).
+    pub sidebar: bool,
+    /// Its width in points, set by dragging its right edge.
+    pub sidebar_width: f32,
 }
+
+pub const SIDEBAR_MIN: f32 = 200.;
+pub const SIDEBAR_MAX: f32 = 400.;
 impl Global for ThemeSettings {}
 
 impl Default for ThemeSettings {
@@ -185,6 +192,8 @@ impl Default for ThemeSettings {
             theme: Theme::default(),
             animate: true,
             address: AddressDisplay::default(),
+            sidebar: true,
+            sidebar_width: 240.,
         }
     }
 }
@@ -209,6 +218,14 @@ impl ThemeSettings {
                     }
                 }
                 ("animate", value) => settings.animate = value != "false",
+                ("sidebar", value) => settings.sidebar = value != "false",
+                ("sidebar_width", value) => {
+                    if let Ok(width) = value.parse::<f32>()
+                        && width.is_finite()
+                    {
+                        settings.sidebar_width = width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                    }
+                }
                 ("address", value) => {
                     if let Some(display) =
                         AddressDisplay::ALL.into_iter().find(|d| d.key() == value)
@@ -224,10 +241,12 @@ impl ThemeSettings {
 
     pub fn serialize(&self) -> String {
         format!(
-            "theme={}\nanimate={}\naddress={}\n",
+            "theme={}\nanimate={}\naddress={}\nsidebar={}\nsidebar_width={:.0}\n",
             self.theme.key(),
             self.animate,
-            self.address.key()
+            self.address.key(),
+            self.sidebar,
+            self.sidebar_width
         )
     }
 
@@ -237,7 +256,7 @@ impl ThemeSettings {
             .map_or_else(Self::default, |text| Self::parse(&text))
     }
 
-    /// Three short lines, written when the user changes a choice.
+    /// A few short lines, written when the user changes a choice.
     pub fn save(&self) {
         // The native UI tests drive these handlers; they must not touch the user's file.
         if cfg!(test) {
@@ -300,12 +319,29 @@ mod tests {
             theme: Theme::AlpinePop,
             animate: false,
             address: AddressDisplay::Domain,
+            sidebar: false,
+            sidebar_width: 312.4,
         };
         let text = settings.serialize();
-        assert_eq!(text, "theme=alpine-pop\nanimate=false\naddress=domain\n");
+        assert_eq!(
+            text,
+            "theme=alpine-pop\nanimate=false\naddress=domain\nsidebar=false\nsidebar_width=312\n"
+        );
+        assert_eq!(ThemeSettings::parse(&text).sidebar_width, 312.);
+        for (text, width) in [("sidebar_width=10", 200.), ("sidebar_width=9999", 400.)] {
+            assert_eq!(ThemeSettings::parse(text).sidebar_width, width);
+        }
+        for text in [
+            "sidebar_width=NaN",
+            "sidebar_width=inf",
+            "sidebar_width=wide",
+        ] {
+            assert_eq!(ThemeSettings::parse(text).sidebar_width, 240.);
+        }
         let parsed = ThemeSettings::parse(&text);
         assert_eq!(parsed.theme, Theme::AlpinePop);
         assert!(!parsed.animate);
+        assert!(!parsed.sidebar);
         assert_eq!(parsed.address, AddressDisplay::Domain);
 
         let sloppy = ThemeSettings::parse("junk\ntheme = Neon Wool\naddress=url\nanimate=yes\n");
@@ -317,7 +353,7 @@ mod tests {
         assert_eq!(sloppy.address, AddressDisplay::Url);
         assert!(sloppy.animate);
         let empty = ThemeSettings::parse("");
-        assert!(empty.animate && empty.address == AddressDisplay::Title);
+        assert!(empty.animate && empty.address == AddressDisplay::Title && empty.sidebar);
     }
 
     #[test]
