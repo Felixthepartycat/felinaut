@@ -89,6 +89,49 @@ impl Render for DragPreview {
     }
 }
 
+/// A tab's right-click menu: which tab, and where the click was (window coordinates).
+#[derive(Clone, Copy)]
+struct TabMenu {
+    id: u64,
+    at: Point<Pixels>,
+}
+
+/// One right-click menu entry: its label and, when it has one, the shortcut that does the same.
+fn menu_item(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    shortcut: Option<&'static str>,
+    p: Palette,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(28.))
+        .px_2()
+        .rounded_md()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_sm()
+        .cursor_pointer()
+        .hover(move |s| s.bg(rgb(p.elevated)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(label.into()),
+        )
+        .when_some(shortcut, |row, keys| {
+            row.child(div().text_xs().text_color(rgb(p.muted)).child(keys))
+        })
+}
+
+fn menu_separator(p: Palette) -> Div {
+    div().h(px(1.)).mx_1().my_1().bg(rgb(p.border))
+}
+
 /// Where a tab dragged over a sidebar row will go: a line above or below the row, or into a
 /// split view with the row's tab. Indices are into `Browser::tabs`, before the drop.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -318,6 +361,10 @@ struct Browser {
     dragging_tab: bool,
     /// Where the tab being dragged over the rows would go: a line or a split preview.
     drop_hint: Option<DropHint>,
+    /// The open right-click menu, if any.
+    menu: Option<TabMenu>,
+    /// Focus for the menu, so Escape closes it.
+    menu_focus: FocusHandle,
     /// `None` without a home, or when the file was unreadable so it is never overwritten.
     pinned_path: Option<PathBuf>,
 }
@@ -490,6 +537,8 @@ impl Browser {
             peek: false,
             dragging_tab: false,
             drop_hint: None,
+            menu: None,
+            menu_focus: cx.focus_handle(),
             pinned_path,
         }
     }
@@ -1006,9 +1055,11 @@ impl Browser {
                 }
             }
         }
-        // Clicking into the other half of a split view makes it the active tab.
+        // Clicking into the other half of a split view makes it the active tab; a click on a
+        // page never reaches GPUI, so it also has to close an open tab menu here.
         if let Some(index) = focused_tab {
             self.activate_half(index, cx);
+            self.close_menu(window, cx);
         }
         let address_focused = self.address.read(cx).focus_handle(cx).is_focused(window);
         if address_changed && !address_focused {
@@ -1191,6 +1242,140 @@ impl Browser {
             self.sync_address(cx);
             cx.notify();
         }
+    }
+    fn open_menu(
+        &mut self,
+        id: u64,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.menu = Some(TabMenu { id, at });
+        window.focus(&self.menu_focus);
+        cx.notify();
+    }
+    fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu.take().is_some() {
+            window.focus(&self.focus);
+            cx.notify();
+        }
+    }
+    /// Right-click menu for a tab: pin, split view and close, so neither depends on knowing
+    /// a shortcut or the drag gesture.
+    fn tab_menu(&self, menu: TabMenu, p: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == menu.id) else {
+            return div().into_any_element();
+        };
+        let tab = &self.tabs[index];
+        let id = tab.id;
+        let pinned = tab.pinned.is_some();
+        let split = tab.split.is_some();
+        let full = cx.global::<ThemeSettings>().sidebar_width;
+        let width = (full - 16.).min(240.);
+        // Kept inside the sidebar: anything drawn over the native page is hidden beneath it.
+        let x = f32::from(menu.at.x).clamp(8., (full - width - 8.).max(8.));
+        // Unpinned tabs outside a split can pair with another such tab.
+        let candidates: Vec<(u64, String)> = if pinned || split {
+            Vec::new()
+        } else {
+            self.tabs[self.pinned_count()..]
+                .iter()
+                .filter(|other| other.id != id && other.split.is_none())
+                .take(6)
+                .map(|other| (other.id, other.display_title()))
+                .collect()
+        };
+        let can_pin = pinned || tab.url() != HOME;
+        let body = div()
+            .id("tab-menu")
+            .track_focus(&self.menu_focus)
+            .w(px(width))
+            .p_1()
+            .rounded_lg()
+            .bg(rgb(p.surface))
+            .border_1()
+            .border_color(rgb(p.border))
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .text_color(rgb(p.text))
+            .font_family(".AppleSystemUIFont")
+            .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_menu(window, cx)))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.close_menu(window, cx);
+                }
+            }))
+            .when(can_pin, |menu| {
+                menu.child(
+                    menu_item(
+                        "menu-pin",
+                        if pinned { "Unpin Tab" } else { "Pin Tab" },
+                        Some("⌘D"),
+                        p,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.close_menu(window, cx);
+                        if let Some(index) = this.tabs.iter().position(|tab| tab.id == id) {
+                            this.toggle_pin_at(index, cx);
+                        }
+                    })),
+                )
+            })
+            .when(split, |menu| {
+                menu.child(
+                    menu_item("menu-unsplit", "End Split View", None, p).on_click(cx.listener(
+                        move |this, _, window, cx| {
+                            this.close_menu(window, cx);
+                            if let Some(index) = this.tabs.iter().position(|tab| tab.id == id) {
+                                this.unsplit(index);
+                                this.hide_others();
+                                cx.notify();
+                            }
+                        },
+                    )),
+                )
+            })
+            .when(!candidates.is_empty(), |menu| {
+                menu.child(menu_separator(p))
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .text_color(rgb(p.muted))
+                            .child("Show side by side with"),
+                    )
+                    .children(candidates.into_iter().map(|(other, title)| {
+                        menu_item(("menu-split", other), title, None, p).on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.close_menu(window, cx);
+                                if let Some(index) = this.tabs.iter().position(|tab| tab.id == id) {
+                                    this.split_tabs(other, index, window, cx);
+                                }
+                            },
+                        ))
+                    }))
+            })
+            .child(menu_separator(p))
+            .child(
+                menu_item("menu-close", "Close Tab", Some("⌘W"), p).on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        this.close_menu(window, cx);
+                        if let Some(index) = this.tabs.iter().position(|tab| tab.id == id) {
+                            this.close_tab_at(index, window, cx);
+                        }
+                    },
+                )),
+            );
+        deferred(
+            anchored()
+                .position(point(px(x), menu.at.y))
+                .snap_to_window_with_margin(px(8.))
+                .child(body),
+        )
+        .with_priority(1)
+        .into_any_element()
     }
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.tabs[self.active].hovered_link = None;
@@ -1684,6 +1869,13 @@ impl Browser {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.select_tab(index, window, cx);
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_menu(id, event.position, window, cx);
+                }),
+            )
             .child(
                 div()
                     .flex_shrink_0()
@@ -1993,6 +2185,13 @@ impl Browser {
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.select_tab(index, window, cx);
                 }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_menu(id, event.position, window, cx);
+                    }),
+                )
                 .child(div().when(tab.loading, |icon| icon.opacity(0.5)).child(
                     match host(&tab.url) {
                         Some(host) => self.site_icon(&host, 20., p),
@@ -2157,6 +2356,9 @@ impl Browser {
                         }
                     }),
             )
+            .when_some(self.menu, |sidebar, menu| {
+                sidebar.child(self.tab_menu(menu, p, cx))
+            })
     }
     /// The active tab's page, or the active split view's two pages side by side.
     fn content(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {
@@ -2244,7 +2446,7 @@ impl Render for Browser {
             .filter(|tab| !tab.home)
             .map(|tab| {
                 format!(
-                    "{} · {}",
+                    "{} · {}  —  Right-click to pin or show side by side",
                     tab.display_title(),
                     history::display_url(&tab.url)
                 )
