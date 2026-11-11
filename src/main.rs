@@ -31,6 +31,10 @@ use theme::{AddressDisplay, Palette, ThemeSettings};
 use webview::{Event, NativePage};
 
 const HOME: &str = "felifox://newtab";
+const SIDEBAR_WIDTH: f32 = 240.;
+const SIDEBAR_SLIDE: Duration = Duration::from_millis(200);
+/// Three tiles and two 8 px gaps fill the sidebar's 223 px list (minus its border and padding).
+const PINNED_TILE: f32 = 69.;
 
 /// The host of a web URL, which keys site icons and labels the title chip.
 pub fn host(url: &str) -> Option<String> {
@@ -188,6 +192,8 @@ struct Browser {
     /// The sidebar row under the pointer; it reveals the pin and fills the status bar.
     hovered_tab: Option<u64>,
     tab_scroll: ScrollHandle,
+    /// When the sidebar last started sliding; `None` once settled or with motion reduced.
+    sidebar_anim: Option<Instant>,
     /// `None` without a home, or when the file was unreadable so it is never overwritten.
     pinned_path: Option<PathBuf>,
 }
@@ -356,6 +362,7 @@ impl Browser {
             hint: None,
             hovered_tab: None,
             tab_scroll: ScrollHandle::new(),
+            sidebar_anim: None,
             pinned_path,
         }
     }
@@ -406,6 +413,14 @@ impl Browser {
     /// Saved with the other settings, so the sidebar stays collapsed across launches.
     fn toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
         self.hint = None;
+        self.sidebar_anim = theme::motion_allowed(cx).then(|| {
+            // Reversing mid-slide continues from the current width instead of jumping.
+            let left = SIDEBAR_SLIDE.saturating_sub(
+                self.sidebar_anim
+                    .map_or(SIDEBAR_SLIDE, |start| start.elapsed()),
+            );
+            Instant::now() - left
+        });
         cx.update_global::<ThemeSettings, _>(|settings, _| {
             settings.sidebar = !settings.sidebar;
             settings.save();
@@ -981,11 +996,11 @@ impl Browser {
     /// Scrolls the sidebar just enough to show the active row.
     fn reveal_active(&self) {
         let pinned = self.pinned_count();
-        // Rows above the unpinned tabs: the divider (when pins exist) and the New tab row.
+        // List children: the pinned grid (when pins exist), the New tab row, then the tabs.
         let row = if self.active < pinned {
-            self.active
+            0
         } else {
-            self.active + usize::from(pinned > 0) + 1
+            self.active - pinned + usize::from(pinned > 0) + 1
         };
         self.tab_scroll.scroll_to_item(row);
     }
@@ -1394,10 +1409,10 @@ impl Browser {
                     .text_color(rgb(p.muted)),
             )
     }
+    /// An unpinned tab; pinned ones are `pinned_tile`s.
     fn tab_row(&self, index: usize, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
         let tab = &self.tabs[index];
         let selected = self.active == index;
-        let pinned = tab.pinned.is_some();
         let id = tab.id;
         let hovered = self.hovered_tab == Some(id);
         div()
@@ -1474,17 +1489,10 @@ impl Browser {
                 )
             })
             // Only rendered while hovered, so a hidden pin can never catch a click.
-            .when(hovered && (pinned || tab.url() != HOME), |row| {
+            .when(hovered && tab.url() != HOME, |row| {
                 row.child(
                     Self::row_control(("pin", id), p)
-                        .on_hover(Self::hint_on_hover(
-                            if pinned {
-                                "Unpin tab · ⌘D"
-                            } else {
-                                "Pin tab · ⌘D"
-                            },
-                            cx,
-                        ))
+                        .on_hover(Self::hint_on_hover("Pin tab · ⌘D", cx))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.toggle_pin_at(index, cx);
@@ -1492,39 +1500,101 @@ impl Browser {
                         .child(
                             brand::icon(brand::icon::PIN)
                                 .size(px(14.))
-                                .text_color(rgb(if pinned { p.primary } else { p.muted })),
+                                .text_color(rgb(p.muted)),
                         ),
                 )
             })
-            // × only on the selected or hovered row; an unloaded pinned tab has nothing to close.
-            .when(
-                (hovered || selected) && !(pinned && tab.page.is_none()),
-                |row| {
-                    row.child(
-                        Self::row_control(("close", id), p)
-                            .on_hover(Self::hint_on_hover(
-                                if pinned {
-                                    "Close tab, keep it pinned · ⌘W"
-                                } else {
-                                    "Close tab · ⌘W"
-                                },
-                                cx,
-                            ))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.close_tab_at(index, window, cx);
-                            }))
-                            .child("×"),
-                    )
-                },
-            )
+            // × only on the selected or hovered row.
+            .when(hovered || selected, |row| {
+                row.child(
+                    Self::row_control(("close", id), p)
+                        .on_hover(Self::hint_on_hover("Close tab · ⌘W", cx))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_tab_at(index, window, cx);
+                        }))
+                        .child("×"),
+                )
+            })
     }
     /// Arc-style vertical tabs: pinned tabs, then a divider, New Tab and the other tabs.
+    /// The sidebar's current width: `SIDEBAR_WIDTH` or 0, eased in between while it slides.
+    fn sidebar_width(&self, cx: &App) -> f32 {
+        let shown = cx.global::<ThemeSettings>().sidebar;
+        let t = self.sidebar_anim.map_or(1., |start| {
+            (start.elapsed().as_secs_f32() / SIDEBAR_SLIDE.as_secs_f32()).min(1.)
+        });
+        let eased = 1. - (1. - t).powi(3);
+        SIDEBAR_WIDTH * if shown { eased } else { 1. - eased }
+    }
+    /// Arc-style pinned tile: the site icon centred in a square-ish card, three per row.
+    fn pinned_tile(&self, index: usize, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
+        let tab = &self.tabs[index];
+        let selected = self.active == index;
+        let id = tab.id;
+        let hovered = self.hovered_tab == Some(id);
+        div()
+            .id(("pinned", id))
+            .relative()
+            .w(px(PINNED_TILE))
+            .h(px(46.))
+            .flex_shrink_0()
+            .rounded_xl()
+            .border_1()
+            .border_color(rgb(if selected { p.border } else { p.surface }))
+            .bg(rgb(if selected { p.elevated } else { p.surface }))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .when(!selected, |tile| {
+                tile.hover(move |s| s.bg(rgb(p.elevated)).border_color(rgb(p.elevated)))
+            })
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.hovered_tab = Some(id);
+                } else if this.hovered_tab == Some(id) {
+                    this.hovered_tab = None;
+                }
+                cx.notify();
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.select_tab(index, window, cx);
+            }))
+            .child(
+                div()
+                    .when(tab.loading, |icon| icon.opacity(0.5))
+                    .child(match host(&tab.url) {
+                        Some(host) => self.site_icon(&host, 20., p),
+                        None => brand::symbol().size(px(20.)).into_any_element(),
+                    }),
+            )
+            // Unpinning lives on hover; ⌘W on a selected tile frees its page, keeping the pin.
+            .when(hovered, |tile| {
+                tile.child(
+                    Self::row_control(("unpin", id), p)
+                        .absolute()
+                        .top(px(1.))
+                        .right(px(1.))
+                        .size(px(20.))
+                        .on_hover(Self::hint_on_hover("Unpin tab · ⌘D", cx))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_pin_at(index, cx);
+                        }))
+                        .child(
+                            brand::icon(brand::icon::PIN)
+                                .size(px(12.))
+                                .text_color(rgb(p.primary)),
+                        ),
+                )
+            })
+    }
     fn sidebar_view(&self, p: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
         let pinned = self.pinned_count();
         div()
             .id("sidebar")
-            .w(px(240.))
+            .w(px(SIDEBAR_WIDTH))
             .h_full()
             .flex_shrink_0()
             .flex()
@@ -1554,9 +1624,15 @@ impl Browser {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .children((0..pinned).map(|index| self.tab_row(index, p, cx)))
                     .when(pinned > 0, |list| {
-                        list.child(div().h(px(1.)).mx_2().my_1().bg(rgb(p.border)))
+                        list.child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_2()
+                                .pb_2()
+                                .children((0..pinned).map(|index| self.pinned_tile(index, p, cx))),
+                        )
                     })
                     .child(
                         // An action, not a tab: no fill or icon tile, quieter text, its shortcut.
@@ -1620,7 +1696,18 @@ impl Render for Browser {
         let p = theme::palette(cx);
         let address_focused = self.address.read(cx).focus_handle(cx).is_focused(window);
         let display = cx.global::<ThemeSettings>().address;
-        let show_sidebar = cx.global::<ThemeSettings>().sidebar;
+        let sidebar_width = self.sidebar_width(cx);
+        if self
+            .sidebar_anim
+            .is_some_and(|start| start.elapsed() < SIDEBAR_SLIDE)
+        {
+            window.request_animation_frame();
+        } else {
+            self.sidebar_anim = None;
+        }
+        // The traffic lights cover the window's first 88 px; once the sidebar is narrower than
+        // that, the toolbar carries the toggle just right of them.
+        let toolbar_toggle = sidebar_width < 88.;
         let tab = &self.tabs[self.active];
         let show_chip = !tab.home && !address_focused && display != AddressDisplay::Url;
         let back_enabled = tab.can_go_back();
@@ -1675,7 +1762,17 @@ impl Render for Browser {
             .on_action(cx.listener(Self::activate_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
-            .when(show_sidebar, |root| root.child(self.sidebar_view(p, cx)))
+            .when(sidebar_width > 0., |root| {
+                // A clipping frame slides; the sidebar inside keeps its width, so nothing reflows.
+                root.child(
+                    div()
+                        .w(px(sidebar_width))
+                        .h_full()
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .child(self.sidebar_view(p, cx)),
+                )
+            })
             .child(
                 div()
                     .flex_1()
@@ -1692,8 +1789,9 @@ impl Render for Browser {
                             .px_4()
                             .gap_2()
                             .bg(rgb(p.surface))
-                            .when(!show_sidebar, |bar| {
-                                bar.pl(px(88.)).child(self.sidebar_button(p, cx))
+                            .when(toolbar_toggle, |bar| {
+                                bar.pl(px((88. - sidebar_width).max(16.)))
+                                    .child(self.sidebar_button(p, cx))
                             })
                             .child(
                                 self.button("back", "←", p)
