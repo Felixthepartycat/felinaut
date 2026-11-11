@@ -180,6 +180,7 @@ struct Browser {
     hint: Option<&'static str>,
     /// The sidebar row under the pointer; it reveals the pin and fills the status bar.
     hovered_tab: Option<u64>,
+    tab_scroll: ScrollHandle,
     /// `None` without a home, or when the file was unreadable so it is never overwritten.
     pinned_path: Option<PathBuf>,
 }
@@ -348,6 +349,7 @@ impl Browser {
             show_sidebar: true,
             hint: None,
             hovered_tab: None,
+            tab_scroll: ScrollHandle::new(),
             pinned_path,
         }
     }
@@ -866,9 +868,9 @@ impl Browser {
                     .and_then(|u| u.host_str().map(str::to_owned))
                     .unwrap_or_else(|| "Loading…".into());
                 tab.page = Some(page.clone());
-                self.tabs.push(tab);
+                let index = self.insert_tab(tab);
                 if activate {
-                    self.select_tab(self.tabs.len() - 1, window, cx);
+                    self.select_tab(index, window, cx);
                     window.on_next_frame(move |_, _| {
                         let _ = page.focus();
                     });
@@ -931,14 +933,36 @@ impl Browser {
         self.active = index;
         self.tabs[index].hovered_link = None;
         self.load_if_needed(index, window);
+        self.reveal_active();
         window.focus(&self.focus);
         self.sync_address(cx);
         cx.notify();
     }
+    /// New tabs open at the top of the unpinned list, right under the New tab row.
+    fn insert_tab(&mut self, tab: Tab) -> usize {
+        let at = self.pinned_count();
+        self.tabs.insert(at, tab);
+        if self.active >= at {
+            self.active += 1;
+        }
+        at
+    }
+    /// Scrolls the sidebar just enough to show the active row.
+    fn reveal_active(&self) {
+        let pinned = self.pinned_count();
+        // Rows above the unpinned tabs: the divider (when pins exist) and the New tab row.
+        let row = if self.active < pinned {
+            self.active
+        } else {
+            self.active + usize::from(pinned > 0) + 1
+        };
+        self.tab_scroll.scroll_to_item(row);
+    }
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.tabs.push(Tab::new(self.next_id));
+        let tab = Tab::new(self.next_id);
         self.next_id += 1;
-        self.select_tab(self.tabs.len() - 1, window, cx);
+        let index = self.insert_tab(tab);
+        self.select_tab(index, window, cx);
         self.focus_address(&FocusAddress, window, cx);
     }
     fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -967,6 +991,7 @@ impl Browser {
         }
         self.active = self.active.min(self.tabs.len() - 1);
         self.load_if_needed(self.active, window);
+        self.reveal_active();
         self.sync_address(cx);
         cx.notify();
     }
@@ -1478,6 +1503,7 @@ impl Browser {
             .child(
                 div()
                     .id("tab-list")
+                    .track_scroll(&self.tab_scroll)
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -1491,26 +1517,35 @@ impl Browser {
                         list.child(div().h(px(1.)).mx_2().my_1().bg(rgb(p.border)))
                     })
                     .child(
+                        // An action, not a tab: no fill or icon tile, quieter text, its shortcut.
                         div()
                             .id("sidebar-new-tab")
-                            .h(px(34.))
+                            .h(px(30.))
                             .flex_shrink_0()
                             .px_2()
                             .rounded_lg()
                             .flex()
                             .items_center()
                             .gap_2()
-                            .text_sm()
+                            .text_xs()
                             .text_color(rgb(p.muted))
                             .cursor_pointer()
-                            .hover(move |s| s.bg(rgb(p.elevated)).text_color(rgb(p.text)))
+                            .hover(move |s| s.bg(rgb(p.surface)).text_color(rgb(p.text)))
                             .on_click(
                                 cx.listener(|this, _, window, cx| {
                                     this.new_tab(&NewTab, window, cx)
                                 }),
                             )
-                            .child(div().w(px(18.)).flex().justify_center().child("+"))
-                            .child("New Tab"),
+                            .child(
+                                div()
+                                    .w(px(18.))
+                                    .flex()
+                                    .justify_center()
+                                    .text_sm()
+                                    .child("+"),
+                            )
+                            .child(div().flex_1().child("New tab"))
+                            .child("⌘T"),
                     )
                     .children((pinned..self.tabs.len()).map(|index| self.tab_row(index, p, cx))),
             )
