@@ -26,8 +26,9 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 from pathlib import Path
+
+from release_version import build_version
 
 ROOT = Path(__file__).resolve().parent.parent
 # Keep the original identity: WebKit website storage and Apple's restricted
@@ -438,7 +439,13 @@ def main():
     for tool in tools:
         if not shutil.which(tool):
             parser.error(f"Required tool is missing: {tool}")
-    version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
+    try:
+        version = build_version(ROOT)
+    except ValueError as error:
+        parser.error(
+            f"Invalid build version: {error}; fix Cargo.toml or unset/correct "
+            "FELINAUT_RELEASE_VERSION"
+        )
     display = display_version((ROOT / "src" / "main.rs").read_text())
     host = next(
         line[6:]

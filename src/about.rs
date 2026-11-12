@@ -287,7 +287,7 @@ fn version_label() -> String {
     format!(
         "{} · {} ({})",
         DISPLAY_VERSION,
-        env!("CARGO_PKG_VERSION"),
+        env!("FELINAUT_BUILD_VERSION"),
         env!("FELINAUT_GIT_COMMIT")
     )
 }
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn about_identifies_the_package_version_and_built_commit() {
+    fn about_identifies_the_effective_build_version_and_built_commit() {
         let revision = env!("FELINAUT_GIT_COMMIT");
         assert!(
             revision == "unknown"
@@ -308,7 +308,31 @@ mod tests {
         );
         assert_eq!(
             super::version_label(),
-            format!("0.1 beta · {} ({revision})", env!("CARGO_PKG_VERSION"))
+            format!("0.1 beta · {} ({revision})", env!("FELINAUT_BUILD_VERSION"))
         );
+    }
+
+    #[test]
+    fn compiled_build_version_is_canonical_and_respects_the_package_patch_floor() {
+        let parse = |version: &str| -> Vec<u64> {
+            let components: Vec<_> = version.split('.').collect();
+            assert_eq!(components.len(), 3);
+            components
+                .into_iter()
+                .map(|component| {
+                    assert!(!component.is_empty());
+                    assert!(component.bytes().all(|byte| byte.is_ascii_digit()));
+                    let value = component.parse::<u64>().expect("u64 version component");
+                    assert_eq!(component, value.to_string());
+                    value
+                })
+                .collect()
+        };
+        let version = env!("FELINAUT_BUILD_VERSION");
+        let effective = parse(version);
+        let source = parse(env!("CARGO_PKG_VERSION"));
+        assert_eq!(effective[..2], source[..2]);
+        assert!(effective[2] >= source[2]);
+        assert!(super::version_label().starts_with(&format!("0.1 beta · {version} (")));
     }
 }

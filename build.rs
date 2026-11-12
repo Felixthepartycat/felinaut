@@ -8,8 +8,54 @@ fn git(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn main() {
+fn parse_version(version: &str) -> Result<[u64; 3], &'static str> {
+    let mut components = version.split('.');
+    let mut parsed = [0; 3];
+    for value in &mut parsed {
+        let component = components.next().ok_or("expected canonical ASCII M.N.P")?;
+        if component.is_empty()
+            || !component.bytes().all(|byte| byte.is_ascii_digit())
+            || (component.len() > 1 && component.starts_with('0'))
+        {
+            return Err("expected canonical ASCII M.N.P without leading zeros or whitespace");
+        }
+        *value = component
+            .parse()
+            .map_err(|_| "version components must be in 0..u64::MAX")?;
+    }
+    if components.next().is_some() {
+        return Err("expected exactly three version components (M.N.P)");
+    }
+    Ok(parsed)
+}
+
+fn build_version() -> Result<String, String> {
+    let base = std::env::var("CARGO_PKG_VERSION")
+        .map_err(|error| format!("Cannot read CARGO_PKG_VERSION: {error}"))?;
+    let source =
+        parse_version(&base).map_err(|error| format!("Invalid CARGO_PKG_VERSION: {error}"))?;
+    let version = match std::env::var("FELINAUT_RELEASE_VERSION") {
+        Ok(version) => version,
+        Err(std::env::VarError::NotPresent) => return Ok(base),
+        Err(error) => return Err(format!("Invalid FELINAUT_RELEASE_VERSION: {error}")),
+    };
+    let release = parse_version(&version)
+        .map_err(|error| format!("Invalid FELINAUT_RELEASE_VERSION: {error}"))?;
+    if release[..2] != source[..2] || release[2] < source[2] {
+        return Err(format!(
+            "FELINAUT_RELEASE_VERSION must have the same major/minor as CARGO_PKG_VERSION ({base}) and a patch at least as large as its source patch"
+        ));
+    }
+    Ok(version)
+}
+
+fn main() -> Result<(), String> {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=FELINAUT_RELEASE_VERSION");
+    println!(
+        "cargo:rustc-env=FELINAUT_BUILD_VERSION={}",
+        build_version()?
+    );
     // Resolve Git paths rather than assuming .git is a directory (worktrees use a file).
     let mut paths = vec!["HEAD".to_owned(), "packed-refs".to_owned()];
     if let Some(reference) = git(&["symbolic-ref", "-q", "HEAD"]) {
@@ -25,4 +71,5 @@ fn main() {
         .map(|sha| sha[..12].to_owned())
         .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=FELINAUT_GIT_COMMIT={revision}");
+    Ok(())
 }

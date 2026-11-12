@@ -17,11 +17,11 @@ import struct
 import subprocess
 import sys
 import tempfile
-import tomllib
 from pathlib import Path
 from xml.parsers.expat import ExpatError
 
 import package_macos as package
+from release_version import build_version
 
 ROOT = Path(__file__).resolve().parent.parent
 EXECUTABLE = Path("Contents/MacOS/felinaut")
@@ -72,7 +72,7 @@ def run(*args: str | Path, timeout: int = 120) -> str:
 
 
 def expected_info() -> dict:
-    version = tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
+    version = build_version(ROOT)
     display = package.display_version((ROOT / "src/main.rs").read_text())
     return package.info_plist(version, display)
 
