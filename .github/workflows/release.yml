@@ -69,7 +69,7 @@ jobs:
           cargo dist --app-only
           codesign --verify --deep --strict dist/Felinaut.app
           lipo dist/Felinaut.app/Contents/MacOS/felinaut -verify_arch '${{ matrix.arch }}'
-      - name: ZIP app (preserve macOS metadata and bundle root)
+      - name: ZIP native app for universal assembly
         env:
           ARCH: ${{ matrix.arch }}
         run: |
@@ -88,15 +88,71 @@ jobs:
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: release-macos-${{ matrix.arch }}
+          name: native-macos-${{ matrix.arch }}
           path: release-assets/*.zip
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+  universal:
+    name: Assemble and verify universal app
+    needs: [build]
+    runs-on: macos-15
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-macos-arm64
+          path: native-zips/arm64
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-macos-x86_64
+          path: native-zips/x86_64
+      - name: Merge fresh native builds and re-sign every architecture
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path('Cargo.toml').read_text())['package']['version']
+          short = subprocess.check_output(['git', 'rev-parse', '--short=12', 'HEAD'], text=True).strip()
+          for arch in ('arm64', 'x86_64'):
+              directory = Path('native-zips') / arch
+              name = f'Felinaut-{version}-{short}-macos-{arch}.zip'
+              if {p.name for p in directory.iterdir()} != {name}:
+                  raise RuntimeError(f'Missing or unexpected native {arch} build artifacts')
+              destination = Path('native-apps') / arch
+              destination.mkdir(parents=True)
+              subprocess.run(['ditto', '-x', '-k', str(directory / name), str(destination)],
+                             check=True, timeout=120)
+          Path('release-assets').mkdir()
+          name = f'Felinaut-{version}-{short}-macos-universal.zip'
+          subprocess.run(['python3', 'scripts/assemble_universal_macos.py',
+                          '--arm64', 'native-apps/arm64/Felinaut.app',
+                          '--x86-64', 'native-apps/x86_64/Felinaut.app',
+                          '--output', f'release-assets/{name}'], check=True, timeout=600)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-universal
+          path: release-assets/*-macos-universal.zip
           if-no-files-found: error
           overwrite: true
           retention-days: 14
 
   publish:
     name: Publish complete prerelease
-    needs: [build]
+    needs: [universal]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -113,10 +169,9 @@ jobs:
           python-version: "3.13"
       - uses: actions/download-artifact@v4
         with:
-          pattern: release-macos-*
+          name: release-macos-universal
           path: release-assets
-          merge-multiple: true
-      - name: Require both architectures and checksum all ZIPs
+      - name: Require the universal ZIP and checksum it
         run: |
           python3 - <<'PY'
           import hashlib
@@ -129,8 +184,9 @@ jobs:
           sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
           short = subprocess.check_output(['git', 'rev-parse', '--short=12', 'HEAD'], text=True).strip()
           assets = Path('release-assets')
-          expected = {f'Felinaut-{version}-{short}-macos-{arch}.zip' for arch in ('arm64', 'x86_64')}
-          assert {p.name for p in assets.iterdir()} == expected, 'Missing or unexpected release assets'
+          expected = {f'Felinaut-{version}-{short}-macos-universal.zip'}
+          if {p.name for p in assets.iterdir()} != expected:
+              raise RuntimeError('Missing or unexpected release assets')
           lines = []
           for name in sorted(expected):
               with (assets / name).open('rb') as file:
@@ -148,12 +204,13 @@ jobs:
         run: |
           cat > release-notes.md <<'NOTES'
           Automated, native macOS builds from the commit targeted by this release.
-          Choose arm64 for Apple Silicon or x86_64 for Intel; extract the ZIP and move Felinaut.app into Applications.
-          Verify the ZIPs with SHA256SUMS before extracting.
+          One universal Felinaut.app contains both Apple Silicon (arm64) and Intel (x86_64) code.
+          Extract the universal ZIP and move Felinaut.app into Applications.
+          Verify the ZIP with SHA256SUMS before extracting.
 
           These apps have local ad-hoc signatures only: no Developer ID signing or Apple notarization.
           Gatekeeper may block downloaded builds. Only override the warning if you trust this source and commit.
-          No Finder DMG, universal binary, updater, or interactive native UI testing is provided by this workflow.
+          No Finder DMG, updater, or interactive native UI testing is provided by this workflow.
           NOTES
           if gh release view "$RELEASE_TAG" --json isDraft > release-state.json; then
             if [ "$(python3 -c 'import json; print(json.load(open("release-state.json"))["isDraft"])')" = False ]; then
