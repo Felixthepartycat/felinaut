@@ -183,6 +183,7 @@ FELINAUT_NOTARY_PROFILE=felinaut-notary cargo dist
 | `⌘W`             | Close active tab                                                |
 | `⌘⇧T`            | Reopen the last closed tab (back in its split view if possible) |
 | `⌘L`             | Focus address and select all                                    |
+| `⌘⇧C`            | Copy the page's link without tracking parameters                |
 | `⌘R`             | Reload                                                          |
 | `⌘+` / `⌘-`      | Zoom in / out; the address bar shows the level, click it to reset |
 | `⌘[` / `⌘]`      | Back / forward                                                  |
@@ -195,6 +196,24 @@ FELINAUT_NOTARY_PROFILE=felinaut-notary cargo dist
 | `⌃Tab` / `⌃⇧Tab` | Next / previous tab (also `⌘⇧]` / `⌘⇧[`)                        |
 | `⌘,`             | Open Settings                                                   |
 | `⌘Q`             | Quit                                                            |
+
+### Copy Clean Link
+
+`⌘⇧C` (or **Edit → Copy Clean Link**) copies the active page's address without tracking. A small pop-up under the toolbar confirms it ("Link copied · Tracking removed", or "No tracking found"). It disappears after about 1.5 seconds, never takes keyboard focus, and lets clicks through to the page.
+
+**Removed everywhere:**
+- Campaign parameters: `utm_*`, `pk_*`, `mtm_*` and `hsa_*`.
+- Ad click IDs such as `fbclid`, `gclid`, `msclkid`, `ttclid` and `twclid`.
+- Email and analytics IDs such as `mc_eid`, `_hsenc` and `_ga`.
+- Text-highlight fragments (`#:~:text=…`).
+
+**Removed only where they track:**
+- **YouTube:** `si`, `feature` and `pp`.
+- **Spotify:** `si`.
+- **Google search pages:** `ved`, `ei`, `sei`, `oq` and similar.
+- **Amazon:** `ref` paths and parameters, `pd_rd_*`, `pf_rd_*`, `qid` and `sr`.
+
+Everything else stays in its original order and encoding, so the link opens the same page. For example, GitHub's `?ref=main` is kept. New Tab and other non-web pages have no link to copy. The rules are in `src/clean_link.rs`.
 
 ### Title-first address bar and history suggestions
 
@@ -342,6 +361,7 @@ The native webview test verifies actual WebKit JavaScript execution, DOM title c
 - `src/main.rs`: GPUI window, tabs and navigation controls.
 - `src/input.rs`: address input adapted from Zed's Apache-2.0 GPUI input example.
 - `src/engine.rs`: address-to-URL/search resolution and the fixed list of search engines.
+- `src/clean_link.rs`, `src/link_toast.rs`: the tracking-free link copied by `⌘⇧C` and its confirmation pop-up.
 - `src/history.rs`: on-disk visit store, fuzzy matcher and frecency ranking.
 - `src/suggestions.rs`: the native, non-focusing history dropdown under the address bar.
 - `src/icons.rs`, `src/page_icon.js`: site icons handed over by the page as validated PNGs, stored per host, with monogram fallback.
