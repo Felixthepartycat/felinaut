@@ -10,6 +10,7 @@ mod engine;
 mod history;
 mod icons;
 mod input;
+mod language;
 mod live;
 mod load_error;
 mod session;
@@ -1675,8 +1676,8 @@ impl Browser {
         }
     }
     fn navigate(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let search = cx.global::<ThemeSettings>().search;
-        let url = match engine::resolve_input(input, search) {
+        let settings = cx.global::<ThemeSettings>();
+        let url = match engine::resolve_input(input, settings.search, settings.language) {
             Ok(url) => url,
             Err(error) => {
                 self.tabs[self.active].error = Some(error);
@@ -4154,6 +4155,9 @@ fn open_links(window: WindowHandle<Browser>, cx: &mut impl AppContext, urls: Vec
 }
 
 fn main() {
+    // Before anything reads the locale: WebKit takes the preferred languages from here.
+    let launch_language = ThemeSettings::load().language;
+    language::apply(launch_language);
     let handoff = Rc::new(RefCell::new(UrlHandoff::default()));
     let opener = handoff.clone();
     let app = Application::new().with_assets(brand::BrandAssets);
@@ -4166,6 +4170,7 @@ fn main() {
     });
     app.run(move |cx: &mut App| {
         cx.set_global(ThemeSettings::load());
+        cx.set_global(settings::LaunchLanguage(launch_language));
         input::init(cx);
         #[cfg(target_os = "macos")]
         webview::forward_command_arrows();
