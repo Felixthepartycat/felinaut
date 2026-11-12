@@ -13,8 +13,6 @@ const WEBKIT: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)";
 /// Safari's own build token, frozen the same way.
 const SAFARI_TOKEN: &str = "605.1.15";
-/// Used when the installed Safari's version cannot be read.
-const FALLBACK_VERSION: &str = "26.0";
 const SAFARI_INFO: &str = "/Applications/Safari.app/Contents/Info.plist";
 
 /// The user agent for `version` (`major.minor`).
@@ -41,6 +39,16 @@ pub fn safari_version(info_plist: &str) -> Option<String> {
     (number(major) && number(minor) && parts.all(number)).then(|| format!("{major}.{minor}"))
 }
 
+/// Safari's version for a macOS version, for when the installed Safari cannot be read. They
+/// are the same from macOS 26 on, and Safari was three ahead from macOS 11 to 15.
+pub fn version_for_macos(major: isize, minor: isize) -> String {
+    if major >= 26 {
+        format!("{major}.{minor}")
+    } else {
+        format!("{}.0", major + 3)
+    }
+}
+
 /// The user agent every Felinaut page uses. Reads Safari's version once, on first use.
 pub fn user_agent() -> &'static str {
     static AGENT: OnceLock<String> = OnceLock::new();
@@ -48,7 +56,10 @@ pub fn user_agent() -> &'static str {
         let version = std::fs::read_to_string(SAFARI_INFO)
             .ok()
             .and_then(|plist| safari_version(&plist))
-            .unwrap_or_else(|| FALLBACK_VERSION.to_owned());
+            .unwrap_or_else(|| {
+                let os = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
+                version_for_macos(os.majorVersion, os.minorVersion)
+            });
         user_agent_for(&version)
     })
 }
@@ -119,6 +130,19 @@ mod tests {
             "bplist00\u{0}\u{1}binary",
         ] {
             assert_eq!(safari_version(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_safari_falls_back_to_the_version_for_this_macos() {
+        for ((major, minor), expected) in [
+            ((26, 0), "26.0"),
+            ((26, 6), "26.6"),
+            ((27, 1), "27.1"),
+            ((15, 6), "18.0"),
+            ((11, 0), "14.0"),
+        ] {
+            assert_eq!(version_for_macos(major, minor), expected);
         }
     }
 

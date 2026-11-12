@@ -140,7 +140,7 @@ About also shows a 12-character Git hash, embedded at compile time. `build.rs` w
 
 Pages see Felinaut as the Safari installed on the Mac, which uses the same system WebKit engine. The user agent is WebKit's own (`Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)`), followed by `Version/<major.minor> Safari/605.1.15`.
 
-- **Where the version comes from:** `/Applications/Safari.app/Contents/Info.plist`, read once on first use. If that file can't be read, it falls back to `26.0`.
+- **Where the version comes from:** `/Applications/Safari.app/Contents/Info.plist`, read once on first use. If that file can't be read, the macOS version decides: the same version from macOS 26 on, and the macOS major version plus three for macOS 11 to 15 (Safari 14 to 18).
 - **Where it applies:** every page Felinaut opens, including the hidden pages that refresh live folders.
 
 **Why:** without the Safari tokens, sites treat Felinaut as an unknown embedded web view. Google, for example, serves an old, stripped-down results page with no **Sign in** button.
