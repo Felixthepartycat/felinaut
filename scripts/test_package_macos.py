@@ -13,10 +13,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import assemble_universal_macos as universal
 import package_macos as package
 
 
 class PackagingTests(unittest.TestCase):
+    def setUp(self):
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("FELINAUT_RELEASE_VERSION", None)
+
     def test_bundle_metadata_round_trips_and_supports_browser_http(self):
         info = package.info_plist("0.1.0", "0.1 beta")
         self.assertEqual(plistlib.loads(plistlib.dumps(info)), info)
@@ -26,6 +33,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(info["CFBundleIconFile"], "Felinaut.icns")
         self.assertEqual(info["CFBundleIdentifier"], "io.github.casaroli.felifox")
         self.assertEqual(info["CFBundleShortVersionString"], "0.1.0")
+        self.assertEqual(info["CFBundleVersion"], "0.1.0")
         self.assertEqual(info["CFBundleGetInfoString"], "Felinaut 0.1 beta")
         self.assertTrue(
             info["NSAppTransportSecurity"]["NSAllowsArbitraryLoadsInWebContent"]
@@ -197,13 +205,19 @@ class PackagingTests(unittest.TestCase):
         )
 
     def test_packaging_builds_and_installs_the_renamed_executable(self):
-        for host, arch in [
-            ("aarch64-apple-darwin", "arm64"),
-            ("x86_64-apple-darwin", "x86_64"),
+        for host, arch, release_version in [
+            (host, arch, release_version)
+            for host, arch in [
+                ("aarch64-apple-darwin", "arm64"),
+                ("x86_64-apple-darwin", "x86_64"),
+            ]
+            for release_version in (None, "0.1.42")
         ]:
             for app_only in (True, False):
                 with (
-                    self.subTest(host=host, app_only=app_only),
+                    self.subTest(
+                        host=host, app_only=app_only, release_version=release_version
+                    ),
                     tempfile.TemporaryDirectory() as directory,
                 ):
                     root = Path(directory)
@@ -239,7 +253,13 @@ class PackagingTests(unittest.TestCase):
                         return output
 
                     argv = ["package_macos.py"] + (["--app-only"] if app_only else [])
+                    env = (
+                        {"FELINAUT_RELEASE_VERSION": release_version}
+                        if release_version is not None
+                        else {}
+                    )
                     with (
+                        patch.dict(os.environ, env),
                         patch.object(package, "ROOT", root),
                         patch.object(package, "SIGN_IDENTITY", ""),
                         patch.object(package, "NOTARY_PROFILE", ""),
@@ -254,6 +274,9 @@ class PackagingTests(unittest.TestCase):
                         package.main()
                     contents = root / "dist" / "Felinaut.app" / "Contents"
                     info = plistlib.loads((contents / "Info.plist").read_bytes())
+                    for key in ("CFBundleShortVersionString", "CFBundleVersion"):
+                        self.assertEqual(info[key], release_version or "0.1.0")
+                    self.assertEqual(info["CFBundleGetInfoString"], "Felinaut 0.1 beta")
                     self.assertEqual(
                         (contents / "MacOS" / info["CFBundleExecutable"]).read_bytes(),
                         b"fresh release executable",
@@ -271,6 +294,10 @@ class PackagingTests(unittest.TestCase):
                         if c.args[:2] == ("cargo", "build")
                     )
                     self.assertIn("--locked", build.args)
+                    self.assertEqual(
+                        build.kwargs["env"].get("FELINAUT_RELEASE_VERSION"),
+                        release_version,
+                    )
                     self.assertEqual(
                         build.args[build.args.index("--bin") + 1], "felinaut"
                     )
@@ -294,6 +321,74 @@ class PackagingTests(unittest.TestCase):
                             (root / "dist" / "SHA256SUMS").read_text(),
                             f"{hashlib.sha256(b'test disk image').hexdigest()}  {name}\n",
                         )
+
+    def test_invalid_release_version_fails_before_build_or_packaging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Cargo.toml").write_text('[package]\nversion = "0.1.7"\n')
+            for value in (
+                "",
+                "v0.1.42",
+                "0.1.042",
+                "0.1.42-beta",
+                "0.1.42\n",
+                "0.2.42",
+                "1.1.42",
+                "0.1.6",
+                "0.1.18446744073709551616",
+            ):
+                with (
+                    self.subTest(value=value),
+                    patch.dict(os.environ, {"FELINAUT_RELEASE_VERSION": value}),
+                    patch.object(package, "ROOT", root),
+                    patch.object(package, "SIGN_IDENTITY", ""),
+                    patch.object(package, "NOTARY_PROFILE", ""),
+                    patch.object(package, "PROVISIONING_PROFILE", ""),
+                    patch.object(package.platform, "system", return_value="Darwin"),
+                    patch.object(package.shutil, "which", return_value="/tool"),
+                    patch.object(package.sys, "argv", ["package_macos.py"]),
+                    patch.object(
+                        package.sys, "stderr", new_callable=io.StringIO
+                    ) as errors,
+                    patch.object(package, "run") as commands,
+                    patch.object(package, "make_app") as make_app,
+                    patch.object(package, "make_dmg") as make_dmg,
+                    self.assertRaises(SystemExit) as error,
+                ):
+                    package.main()
+                self.assertEqual(error.exception.code, 2)
+                self.assertIn("FELINAUT_RELEASE_VERSION", errors.getvalue())
+                commands.assert_not_called()
+                make_app.assert_not_called()
+                make_dmg.assert_not_called()
+                self.assertFalse((root / "dist").exists())
+                self.assertFalse((root / "target").exists())
+
+    def test_universal_expected_metadata_uses_effective_build_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Cargo.toml").write_text('[package]\nversion = "0.1.7"\n')
+            (root / "src").mkdir()
+            (root / "src/main.rs").write_text(
+                'pub const DISPLAY_VERSION: &str = "0.1 beta";'
+            )
+            with patch.object(universal, "ROOT", root):
+                base = universal.expected_info()
+                self.assertEqual(base, package.info_plist("0.1.7", "0.1 beta"))
+                for value in ("0.1.7", "0.1.42"):
+                    with (
+                        self.subTest(value=value),
+                        patch.dict(os.environ, {"FELINAUT_RELEASE_VERSION": value}),
+                    ):
+                        info = universal.expected_info()
+                    self.assertEqual(info, package.info_plist(value, "0.1 beta"))
+                    self.assertEqual(info["CFBundleShortVersionString"], value)
+                    self.assertEqual(info["CFBundleVersion"], value)
+                with (
+                    patch.dict(os.environ, {"FELINAUT_RELEASE_VERSION": "0.1.6"}),
+                    self.assertRaisesRegex(ValueError, "FELINAUT_RELEASE_VERSION"),
+                ):
+                    universal.expected_info()
 
     def test_versions_come_from_source(self):
         source = (package.ROOT / "src" / "main.rs").read_text()
