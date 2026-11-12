@@ -15,6 +15,7 @@ mod suggestions;
 mod theme;
 mod volume;
 mod webview;
+mod zoom;
 
 use audio::{AudioReport, PageSound, TabAudio};
 use gpui::{prelude::*, *};
@@ -302,6 +303,10 @@ struct ClosedTab {
 #[derive(Clone, PartialEq, Action)]
 #[action(namespace = felinaut, no_json)]
 struct ActivateTab(usize);
+/// Steps the active page's zoom: `1` in, `-1` out, `0` back to 100 %.
+#[derive(Clone, PartialEq, Action)]
+#[action(namespace = felinaut, no_json)]
+struct Zoom(i8);
 const LAST_TAB: usize = usize::MAX;
 
 struct Tab {
@@ -434,6 +439,7 @@ struct Browser {
     _submit: Subscription,
     _theme_observer: Subscription,
     art_phase: f32,
+    zoom_flash: Option<Instant>,
     history: History,
     last_save: Instant,
     /// History rows matching the address text, shown by `suggestions` while typing.
@@ -536,6 +542,7 @@ impl Browser {
                 AddressEvent::Up => this.move_selection(false, cx),
                 AddressEvent::Down => this.move_selection(true, cx),
                 AddressEvent::Escape => this.close_suggestions(true, window, cx),
+                AddressEvent::ResetZoom => this.zoom(&Zoom(0), window, cx),
             },
         );
         let address_focus = address.read(cx).focus_handle(cx);
@@ -647,6 +654,7 @@ impl Browser {
             _submit: subscription,
             _theme_observer: theme_observer,
             art_phase: 0.,
+            zoom_flash: None,
             history: History::load(history::default_path()),
             last_save: Instant::now(),
             suggestions: Vec::new(),
@@ -1357,6 +1365,15 @@ impl Browser {
                     .text_size(px(14.))
                     .child(label),
             )
+            .when_some(self.zoom_label(), |chip, (zoom, flash)| {
+                chip.child(input::zoom_badge(p, zoom, flash).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.zoom(&Zoom(0), window, cx);
+                    }),
+                ))
+            })
             .when_some(detail, |chip, detail| {
                 chip.child(
                     div()
@@ -1700,6 +1717,26 @@ impl Browser {
             };
             self.set_audio(id, audio, cx);
         }
+    }
+    fn zoom(&mut self, zoom: &Zoom, _: &mut Window, cx: &mut Context<Self>) {
+        let tab = &mut self.tabs[self.active];
+        if let Some(page) = tab.page.as_ref().filter(|_| !tab.home) {
+            let before = page.zoom();
+            tab.error = page.set_zoom(zoom::step(before, zoom.0)).err();
+            if before == 1.0 && theme::motion_allowed(cx) {
+                self.zoom_flash = Some(Instant::now());
+            }
+            cx.notify();
+        }
+    }
+    /// The active page's zoom level, shown in the address bar while it isn't 100 %.
+    fn zoom_label(&self) -> Option<(SharedString, f32)> {
+        let tab = &self.tabs[self.active];
+        let label = zoom::label(tab.page.as_ref().filter(|_| !tab.home)?.zoom())?;
+        let flash = self
+            .zoom_flash
+            .map_or(1., |at| at.elapsed().as_secs_f32() / 0.4);
+        Some((label.into(), flash.min(1.)))
     }
     fn mute_tab(&mut self, _: &MuteTab, _: &mut Window, cx: &mut Context<Self>) {
         self.toggle_mute(self.tabs[self.active].id, cx);
@@ -3873,6 +3910,11 @@ impl Render for Browser {
             Some(DropHint::Split(_)) => Some("Release to show side by side".to_owned()),
             _ => None,
         };
+        let zoom = self.zoom_label();
+        if zoom.as_ref().is_some_and(|(_, flash)| *flash < 1.) {
+            window.request_animation_frame();
+        }
+        self.address.update(cx, |input, _| input.set_zoom(zoom));
         let status = drop_status
             .or(self.hint.map(str::to_owned))
             .or(self.live_hover.clone())
@@ -3909,6 +3951,7 @@ impl Render for Browser {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::pin_tab))
             .on_action(cx.listener(Self::activate_tab))
+            .on_action(cx.listener(Self::zoom))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::reopen_tab))
@@ -4100,6 +4143,10 @@ fn main() {
             KeyBinding::new("cmd-shift-]", NextTab, None),
             KeyBinding::new("cmd-shift-[", PreviousTab, None),
             KeyBinding::new("cmd-9", ActivateTab(LAST_TAB), None),
+            KeyBinding::new("cmd-=", Zoom(1), None),
+            KeyBinding::new("cmd-+", Zoom(1), None),
+            KeyBinding::new("cmd--", Zoom(-1), None),
+            KeyBinding::new("cmd-0", Zoom(0), None),
         ]);
         cx.bind_keys(
             (1..=8).map(|n| KeyBinding::new(&format!("cmd-{n}"), ActivateTab(n - 1), None)),
@@ -4146,7 +4193,13 @@ fn main() {
                 ]
                 .into_iter()
                 .chain((1..=8).map(|n| MenuItem::action(format!("Tab {n}"), ActivateTab(n - 1))))
-                .chain([MenuItem::action("Last Tab", ActivateTab(LAST_TAB))])
+                .chain([
+                    MenuItem::action("Last Tab", ActivateTab(LAST_TAB)),
+                    MenuItem::separator(),
+                    MenuItem::action("Zoom In", Zoom(1)),
+                    MenuItem::action("Zoom Out", Zoom(-1)),
+                    MenuItem::action("Actual Size", Zoom(0)),
+                ])
                 .collect(),
             },
             Menu {

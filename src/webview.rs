@@ -161,6 +161,17 @@ impl NativePage {
             .map_err(|error| error.to_string())
     }
 
+    /// WebKit's page zoom; the page keeps it across navigations.
+    pub fn zoom(&self) -> f64 {
+        use wry::WebViewExtMacOS;
+        // SAFETY: a property read on a live WKWebView owned by this page, on the main thread.
+        unsafe { self.webview.webview().pageZoom() }
+    }
+
+    pub fn set_zoom(&self, zoom: f64) -> Result<(), String> {
+        self.webview.zoom(zoom).map_err(|error| error.to_string())
+    }
+
     pub fn navigate(&self, url: &str) -> Result<(), String> {
         check_url(url)?;
         self.webview
