@@ -212,7 +212,11 @@ mod tests {
             assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), width);
             assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), height);
             let rgba = render_filter("magick", &["png:-", "-depth", "8", "rgba:-"], &png);
-            let pixels: Vec<_> = rgba.chunks_exact(4).collect();
+            let (pixels, remainder) = rgba.as_chunks::<4>();
+            assert!(
+                remainder.is_empty(),
+                "renderer returned an incomplete RGBA pixel"
+            );
             assert_eq!(rgba.len(), (width * height * 4) as usize);
             for index in [0, width - 1, (height - 1) * width, height * width - 1] {
                 assert_eq!(pixels[index as usize][3], 0, "{path}: transparent corner");
@@ -293,7 +297,11 @@ mod tests {
             assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), height);
             let rgba = render_filter("magick", &["png:-", "-depth", "8", "rgba:-"], &png);
             assert_eq!(rgba.len(), (width * height * 4) as usize);
-            let pixels: Vec<_> = rgba.chunks_exact(4).collect();
+            let (pixels, remainder) = rgba.as_chunks::<4>();
+            assert!(
+                remainder.is_empty(),
+                "renderer returned an incomplete RGBA pixel"
+            );
             for index in [0, width - 1, (height - 1) * width, height * width - 1] {
                 assert_eq!(
                     pixels[index as usize][3], 0,
