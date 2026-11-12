@@ -68,7 +68,7 @@ jobs:
         run: |
           cargo dist --app-only
           codesign --verify --deep --strict dist/Felinaut.app
-          lipo -verify_arch '${{ matrix.arch }}' dist/Felinaut.app/Contents/MacOS/felinaut
+          lipo dist/Felinaut.app/Contents/MacOS/felinaut -verify_arch '${{ matrix.arch }}'
       - name: ZIP app (preserve macOS metadata and bundle root)
         env:
           ARCH: ${{ matrix.arch }}
