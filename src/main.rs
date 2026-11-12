@@ -9,6 +9,7 @@ mod downloads;
 mod engine;
 mod history;
 mod icons;
+mod identity;
 mod input;
 mod language;
 mod live;
