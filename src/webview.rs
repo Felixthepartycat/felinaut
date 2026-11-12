@@ -1,12 +1,14 @@
 //! Native pages live on GPUI's UI thread and must be dropped before their parent window.
 
 use std::cell::RefCell;
-use std::sync::mpsc::{self, Receiver};
+use std::collections::HashMap;
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use gpui::{Bounds, Pixels};
 use wry::{NewWindowResponse, PageLoadEvent, WebView, WebViewBuilder};
 
 use crate::audio::{AudioReport, TabAudio, parse_report};
+use crate::load_error::LoadFailure;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -22,6 +24,10 @@ pub enum Event {
     Audio(AudioReport),
     /// The site's icon as a small validated PNG.
     Icon(Vec<u8>),
+    /// A top-level load failed before anything was shown; the previous document remains.
+    Failed(LoadFailure),
+    /// A load ended without finishing: cancelled, or failed after the page was shown.
+    Stopped,
 }
 
 /// One persistent native child view per tab; hiding it does not discard its history or document.
@@ -30,6 +36,15 @@ pub struct NativePage {
     webview: WebView,
     events: Receiver<Event>,
     last_url: RefCell<String>,
+    failure_key: Option<usize>,
+}
+
+impl Drop for NativePage {
+    fn drop(&mut self) {
+        if let Some(key) = self.failure_key {
+            FAILURES.with_borrow_mut(|pages| pages.remove(&key));
+        }
+    }
 }
 
 impl NativePage {
@@ -40,6 +55,7 @@ impl NativePage {
         let load_sender = sender.clone();
         let title_sender = sender.clone();
         let link_sender = sender.clone();
+        let failure_sender = sender.clone();
         let mut builder = WebViewBuilder::new();
         if agent_enabled() {
             builder =
@@ -88,11 +104,13 @@ impl NativePage {
             .with_url(url)
             .build_as_child(window)
             .map_err(|error| error.to_string())?;
+        let failure_key = watch_failures(&webview, failure_sender);
 
         Ok(Self {
             webview,
             events,
             last_url: RefCell::new(String::new()),
+            failure_key,
         })
     }
 
@@ -123,6 +141,7 @@ impl NativePage {
             webview,
             events,
             last_url: RefCell::new(String::new()),
+            failure_key: None,
         })
     }
 
@@ -167,6 +186,23 @@ impl NativePage {
 
     pub fn can_go_forward(&self) -> bool {
         self.webview.can_go_forward().unwrap_or(false)
+    }
+
+    pub fn is_loading(&self) -> bool {
+        use wry::WebViewExtMacOS;
+        // SAFETY: a property read on a live WKWebView owned by this page, on the main thread.
+        unsafe { self.webview.webview().isLoading() }
+    }
+
+    /// The URL and title on display; none after a failed first load.
+    pub fn document(&self) -> Option<(String, String)> {
+        use wry::WebViewExtMacOS;
+        let url = self.current_url().filter(|url| !url.is_empty())?;
+        // SAFETY: a property read on a live WKWebView owned by this page, on the main thread.
+        let title = unsafe { self.webview.webview().title() }
+            .map(|title| title.to_string())
+            .unwrap_or_default();
+        Some((url, title))
     }
 
     pub fn set_visible(&self, visible: bool) -> Result<(), String> {
@@ -373,6 +409,88 @@ impl NativePage {
         let absolute = url.absoluteString()?;
         Some(absolute.to_string())
     }
+}
+
+thread_local! {
+    /// Each page's event channel, by its WKWebView's address.
+    static FAILURES: RefCell<HashMap<usize, Sender<Event>>> = RefCell::default();
+}
+
+/// Adds failure methods to Wry's navigation delegate; failures go to `sender`.
+fn watch_failures(webview: &WebView, sender: Sender<Event>) -> Option<usize> {
+    use objc2::runtime::{AnyObject, Imp, Sel};
+    use objc2::{msg_send, rc::Retained, sel};
+    use wry::WebViewExtMacOS;
+
+    type Callback = unsafe extern "C-unwind" fn(
+        *mut AnyObject,
+        Sel,
+        *mut AnyObject,
+        *mut AnyObject,
+        *mut objc2_foundation::NSError,
+    );
+    unsafe extern "C-unwind" fn failed(
+        _: *mut AnyObject,
+        selector: Sel,
+        webview: *mut AnyObject,
+        _: *mut AnyObject,
+        error: *mut objc2_foundation::NSError,
+    ) {
+        let provisional = selector == sel!(webView:didFailProvisionalNavigation:withError:);
+        // SAFETY: WebKit passes a live error, or null, on the main thread.
+        report_failure(webview as usize, unsafe { error.as_ref() }, provisional);
+    }
+
+    let view = webview.webview();
+    // SAFETY: a property read on a live WKWebView, on the main thread. Wry keeps the delegate
+    // alive (WKWebView only holds it weakly) for as long as the WebView.
+    let delegate: Option<Retained<AnyObject>> = unsafe { msg_send![&*view, navigationDelegate] };
+    let delegate = delegate?;
+    let class = delegate.class();
+    // SAFETY: `class` is Wry's registered delegate class. Adding a method only succeeds if the
+    // class lacks it, so Wry's own methods are never replaced and later pages add nothing. The
+    // function matches the `v@:@@@` encoding: void, self, _cmd, then three objects.
+    unsafe {
+        let class = class as *const _ as *mut _;
+        let failed = std::mem::transmute::<Callback, Imp>(failed);
+        for selector in [
+            sel!(webView:didFailProvisionalNavigation:withError:),
+            sel!(webView:didFailNavigation:withError:),
+        ] {
+            objc2::ffi::class_addMethod(class, selector, failed, c"v@:@@@".as_ptr());
+        }
+    }
+    // WebKit caches which methods a delegate implements when it is set, so set it again.
+    // SAFETY: the same live delegate, on the main thread.
+    let _: () = unsafe { msg_send![&*view, setNavigationDelegate: &*delegate] };
+    let key = Retained::as_ptr(&view) as usize;
+    FAILURES.with_borrow_mut(|pages| pages.insert(key, sender));
+    Some(key)
+}
+
+/// Runs inside a WebKit callback, so it only queues an event for the UI.
+fn report_failure(key: usize, error: Option<&objc2_foundation::NSError>, provisional: bool) {
+    let failure = error.filter(|_| provisional).and_then(|error| {
+        let info = error.userInfo();
+        let url = info
+            .objectForKey(objc2_foundation::ns_string!("NSErrorFailingURLKey"))
+            .and_then(|url| url.downcast::<objc2_foundation::NSURL>().ok())
+            .and_then(|url| url.absoluteString())
+            .map(|url| url.to_string())
+            .unwrap_or_default();
+        crate::load_error::failure(
+            &error.domain().to_string(),
+            error.code() as i64,
+            &url,
+            &error.localizedDescription().to_string(),
+        )
+    });
+    let event = failure.map_or(Event::Stopped, Event::Failed);
+    FAILURES.with_borrow(|pages| {
+        if let Some(sender) = pages.get(&key) {
+            let _ = sender.send(event);
+        }
+    });
 }
 
 /// The content bridge has no privileged commands: only link status and web-tab requests.
