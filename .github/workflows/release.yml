@@ -10,8 +10,30 @@ permissions:
 
 # Deliberately no concurrency group: newer pushes must not cancel queued commits.
 jobs:
+  metadata:
+    name: Determine semantic release version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Derive a repeatable patch version from first-parent history
+        id: version
+        run: python3 scripts/release_version.py --github-output "$GITHUB_OUTPUT"
+
   build:
     name: Validate and build (${{ matrix.arch }})
+    needs: [metadata]
+    env:
+      FELINAUT_RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -76,10 +98,9 @@ jobs:
           python3 - <<'PY'
           import os
           import subprocess
-          import tomllib
           from pathlib import Path
 
-          version = tomllib.loads(Path('Cargo.toml').read_text())['package']['version']
+          version = os.environ['FELINAUT_RELEASE_VERSION']
           short = subprocess.check_output(['git', 'rev-parse', '--short=12', 'HEAD'], text=True).strip()
           name = f"Felinaut-{version}-{short}-macos-{os.environ['ARCH']}.zip"
           Path('release-assets').mkdir()
@@ -96,7 +117,9 @@ jobs:
 
   universal:
     name: Assemble and verify universal app
-    needs: [build]
+    needs: [metadata, build]
+    env:
+      FELINAUT_RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
     runs-on: macos-15
     timeout-minutes: 20
     defaults:
@@ -120,11 +143,12 @@ jobs:
       - name: Merge fresh native builds and re-sign every architecture
         run: |
           python3 - <<'PY'
+          import os
+          import shutil
           import subprocess
-          import tomllib
           from pathlib import Path
 
-          version = tomllib.loads(Path('Cargo.toml').read_text())['package']['version']
+          version = os.environ['FELINAUT_RELEASE_VERSION']
           short = subprocess.check_output(['git', 'rev-parse', '--short=12', 'HEAD'], text=True).strip()
           for arch in ('arm64', 'x86_64'):
               directory = Path('native-zips') / arch
@@ -141,18 +165,25 @@ jobs:
                           '--arm64', 'native-apps/arm64/Felinaut.app',
                           '--x86-64', 'native-apps/x86_64/Felinaut.app',
                           '--output', f'release-assets/{name}'], check=True, timeout=600)
+          for arch in ('arm64', 'x86_64'):
+              name = f'Felinaut-{version}-{short}-macos-{arch}.zip'
+              shutil.copy2(Path('native-zips') / arch / name, Path('release-assets') / name)
           PY
       - uses: actions/upload-artifact@v7
         with:
-          name: release-macos-universal
-          path: release-assets/*-macos-universal.zip
+          name: release-macos-all
+          path: release-assets/*.zip
           if-no-files-found: error
           overwrite: true
           retention-days: 14
 
   publish:
     name: Publish complete prerelease
-    needs: [universal]
+    if: github.ref == 'refs/heads/main'
+    needs: [metadata, universal]
+    env:
+      FELINAUT_RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+      FELINAUT_RELEASE_TAG: ${{ needs.metadata.outputs.tag }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -169,24 +200,34 @@ jobs:
           python-version: "3.13"
       - uses: actions/download-artifact@v8
         with:
-          name: release-macos-universal
+          name: release-macos-all
           path: release-assets
-      - name: Require the universal ZIP and checksum it
+      - name: Require all three release ZIPs and checksum them
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
           import hashlib
           import os
           import subprocess
-          import tomllib
+          import sys
           from pathlib import Path
 
-          version = tomllib.loads(Path('Cargo.toml').read_text())['package']['version']
+          sys.path.insert(0, 'scripts')
+          from release_version import verify_release_tag
+
+          version = os.environ['FELINAUT_RELEASE_VERSION']
           sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
           short = subprocess.check_output(['git', 'rev-parse', '--short=12', 'HEAD'], text=True).strip()
           assets = Path('release-assets')
-          expected = {f'Felinaut-{version}-{short}-macos-universal.zip'}
+          expected = {f'Felinaut-{version}-{short}-macos-{arch}.zip'
+                      for arch in ('arm64', 'x86_64', 'universal')}
           if {p.name for p in assets.iterdir()} != expected:
               raise RuntimeError('Missing or unexpected release assets')
+          tag = os.environ['FELINAUT_RELEASE_TAG']
+          if tag != f'v{version}':
+              raise RuntimeError('Release tag and version disagree')
+          verify_release_tag(os.environ['GITHUB_REPOSITORY'], tag, sha)
           lines = []
           for name in sorted(expected):
               with (assets / name).open('rb') as file:
@@ -194,7 +235,7 @@ jobs:
               lines.append(f'{digest}  {name}\n')
           (assets / 'SHA256SUMS').write_text(''.join(lines))
           with open(os.environ['GITHUB_ENV'], 'a') as env:
-              env.write(f'RELEASE_TAG=main-{sha}\nRELEASE_TITLE=Felinaut {version} ({short})\n')
+              env.write(f'RELEASE_TAG={tag}\nRELEASE_TITLE=Felinaut {version} ({short})\n')
           PY
           (cd release-assets && sha256sum --check SHA256SUMS)
       - name: Create or resume draft, upload, then publish
@@ -204,19 +245,28 @@ jobs:
         run: |
           cat > release-notes.md <<'NOTES'
           Automated, native macOS builds from the commit targeted by this release.
-          One universal Felinaut.app contains both Apple Silicon (arm64) and Intel (x86_64) code.
-          Extract the universal ZIP and move Felinaut.app into Applications.
-          Verify the ZIP with SHA256SUMS before extracting.
+          Download the universal ZIP for either Mac, or the smaller arm64 (Apple Silicon) or x86_64 (Intel) ZIP.
+          The universal app contains both native architectures. Extract your chosen ZIP and move Felinaut.app into Applications.
+          Verify the chosen ZIP against its SHA256SUMS entry before extracting.
 
           These apps have local ad-hoc signatures only: no Developer ID signing or Apple notarization.
           Gatekeeper may block downloaded builds. Only override the warning if you trust this source and commit.
           No Finder DMG, updater, or interactive native UI testing is provided by this workflow.
           NOTES
-          if gh release view "$RELEASE_TAG" --json isDraft > release-state.json; then
+          if gh release view "$RELEASE_TAG" --json isDraft,targetCommitish > release-state.json; then
             if [ "$(python3 -c 'import json; print(json.load(open("release-state.json"))["isDraft"])')" = False ]; then
               echo "This commit already has a published release; leaving its assets unchanged."
               exit 0
             fi
+            python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          state = json.loads(Path('release-state.json').read_text())
+          if state.get('targetCommitish') != os.environ['GITHUB_SHA']:
+              raise RuntimeError('Existing draft does not target this exact source commit; refusing to upload')
+          PY
           else
             gh release create "$RELEASE_TAG" \
               --target "$GITHUB_SHA" \
