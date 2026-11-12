@@ -193,6 +193,7 @@ FELINAUT_NOTARY_PROFILE=felinaut-notary cargo dist
 | `⌘D`             | Pin / unpin active tab                                          |
 | `⌘1`–`⌘8` / `⌘9` | Go to tab 1–8 / last tab                                        |
 | `⌃Tab` / `⌃⇧Tab` | Next / previous tab (also `⌘⇧]` / `⌘⇧[`)                        |
+| `⌘,`             | Open Settings                                                   |
 | `⌘Q`             | Quit                                                            |
 
 ### Title-first address bar and history suggestions
@@ -275,7 +276,7 @@ Limitations: there is no pause or resume, no "ask where to save", no per-site fo
 
 The toolbar's **Theme ▾** button opens six curated palettes: **Milky Way** (the new-profile default), Midnight Party, Confetti Sunset, Neon Wool, Alpine Pop, and Forest Carnival. Existing saved selections keep their original theme keys. Themes recolor Felinaut's chrome, address field, New Tab page and About window—not websites. Theme, animation and address-bar choices are saved to `~/Library/Application Support/Felifox/settings` (`key=value` lines, including sidebar choices and `search=` for the search engine) and restored on launch.
 
-Address-bar searches use **DuckDuckGo** by default. The other choices are **Google**, **Bing**, **Brave Search**, **Ecosia** and **Startpage**; the choice is saved as `search=duckduckgo|google|bing|brave|ecosia|startpage`. The list is fixed: only the encoded query varies, so a saved value cannot send searches to any other site. A missing, unknown or edited value falls back to DuckDuckGo, and older settings files keep working.
+Address-bar searches use **DuckDuckGo** by default. Choose another in **Felinaut → Settings…** (`⌘,`), under **Search engine**; the change applies to your next search. The other choices are **Google**, **Bing**, **Brave Search**, **Ecosia** and **Startpage**; the choice is saved as `search=duckduckgo|google|bing|brave|ecosia|startpage`. The list is fixed: only the encoded query varies, so a saved value cannot send searches to any other site. A missing, unknown or edited value falls back to DuckDuckGo, and older settings files keep working.
 
 - **Original embedded SVG artwork:** a happy orange-and-cream astronaut cat exploring colorful yarn planets, a simplified helmet symbol, and a floating cardboard exploration box on New Tab. She has one clear smile, a cyan bubble visor, and a white/lavender suit. No fox emoji, external assets or large background bitmaps.
 - **Six distinct procedural scenes:** Milky Way has layered galactic nebulae, subtle stars, moons and cross-wound yarn planets. All themes share restrained orbital threads and wool-planet discoveries; Midnight Party has tumbling confetti, streamers, golden stars and neon ribbons; Confetti Sunset has a golden sun, peach/coral hills and falling confetti; Alpine Pop has snowcapped ice mountains, glacier facets, drifting snow and ridge glints; Neon Wool has rolling yarn balls and flowing loose threads; Forest Carnival has swaying foliage, citrus, cherries, flowers and fluttering petals.
@@ -333,7 +334,7 @@ The native webview test verifies actual WebKit JavaScript execution, DOM title c
 
 - `src/main.rs`: GPUI window, tabs and navigation controls.
 - `src/input.rs`: address input adapted from Zed's Apache-2.0 GPUI input example.
-- `src/engine.rs`: address-to-URL/search resolution only.
+- `src/engine.rs`: address-to-URL/search resolution and the fixed list of search engines.
 - `src/history.rs`: on-disk visit store, fuzzy matcher and frecency ranking.
 - `src/suggestions.rs`: the native, non-focusing history dropdown under the address bar.
 - `src/icons.rs`, `src/page_icon.js`: site icons handed over by the page as validated PNGs, stored per host, with monogram fallback.
@@ -346,6 +347,7 @@ The native webview test verifies actual WebKit JavaScript execution, DOM title c
 - `src/brand.rs` and `assets/`: embedded original SVG mascot, symbol and monochrome UI icons.
 - `src/appearance.rs`: native theme dropdown and animation control.
 - `src/about.rs`, `build.rs`: themed About window and compile-time Git build identity.
+- `src/settings.rs`: the Settings window (`⌘,`) and its search engine choice.
 - `tests/native_webview.rs`: opt-in native JavaScript integration test.
 - `tests/brand_ui.rs`: opt-in SVG decode, theme-handler, motion-toggle and About lifecycle checks.
 - `tests/native_audio.rs`: opt-in WebKit check of audio routing, cross-origin fallback and reset.

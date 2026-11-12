@@ -28,6 +28,17 @@ impl SearchEngine {
         Self::Startpage,
     ];
 
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::DuckDuckGo => "DuckDuckGo",
+            Self::Google => "Google",
+            Self::Bing => "Bing",
+            Self::Brave => "Brave Search",
+            Self::Ecosia => "Ecosia",
+            Self::Startpage => "Startpage",
+        }
+    }
+
     /// The persisted identifier, independent of the display name.
     pub fn key(self) -> &'static str {
         match self {

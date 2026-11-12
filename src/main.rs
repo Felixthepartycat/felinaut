@@ -13,6 +13,7 @@ mod input;
 mod live;
 mod load_error;
 mod session;
+mod settings;
 mod suggestions;
 mod theme;
 mod volume;
@@ -282,6 +283,7 @@ actions!(
         Home,
         Quit,
         AboutFelinaut,
+        OpenSettings,
         VolumeControls,
         MuteTab,
         ToggleSidebar,
@@ -4176,6 +4178,7 @@ fn main() {
             KeyBinding::new("cmd-]", Forward, None),
             KeyBinding::new("cmd-shift-h", Home, None),
             KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-shift-m", MuteTab, None),
             KeyBinding::new("cmd-s", ToggleSidebar, None),
             KeyBinding::new("cmd-d", PinTab, None),
@@ -4200,6 +4203,8 @@ fn main() {
                 name: "Felinaut".into(),
                 items: vec![
                     MenuItem::action("About Felinaut", AboutFelinaut),
+                    MenuItem::separator(),
+                    MenuItem::action("Settings…", OpenSettings),
                     MenuItem::separator(),
                     MenuItem::action("Quit Felinaut", Quit),
                 ],
@@ -4265,6 +4270,7 @@ fn main() {
             },
         ]);
         cx.on_action(|_: &AboutFelinaut, cx| about::open(cx));
+        cx.on_action(|_: &OpenSettings, cx| settings::open(cx));
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
