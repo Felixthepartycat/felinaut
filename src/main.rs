@@ -1673,7 +1673,8 @@ impl Browser {
         }
     }
     fn navigate(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let url = match engine::resolve_input(input) {
+        let search = cx.global::<ThemeSettings>().search;
+        let url = match engine::resolve_input(input, search) {
             Ok(url) => url,
             Err(error) => {
                 self.tabs[self.active].error = Some(error);

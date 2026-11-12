@@ -41,7 +41,7 @@ CARGO_PROFILE_RELEASE_STRIP=none cargo build --release
 ./target/release/felinaut
 ```
 
-The first build downloads dependencies from crates.io. The new-tab page contains no remote assets or telemetry. Search queries go to DuckDuckGo. Websites control their own requests once loaded.
+The first build downloads dependencies from crates.io. The new-tab page contains no remote assets or telemetry. Search queries go to your chosen search engine (DuckDuckGo by default). Websites control their own requests once loaded.
 
 ## Build a DMG for friends
 
@@ -206,7 +206,7 @@ Every completed HTTP(S) page load is remembered with its title, visit count and 
 - Matching is case-insensitive and fuzzy: contiguous text ranks highest, with a bonus for starting the host (`rust` → **rust**-lang.org) or a word; scattered subsequences (`hkrn` → **H**ac**k**e**r** **N**ews) still match. Every space-separated word must match the title or the URL. Equal matches are ordered by frecency: more visits and more recent visits first.
 - Each row shows the title and the URL with the matched characters highlighted.
 - Typing completes the first row whose address contains the text, drawn dimmed around what you typed: `le` shows `goog`**le**`.com`, `lang.org` shows `rust-`**lang.org**. `Enter` opens that page, `→` at the end of the text accepts the completion into the field, and editing keeps working on just what you typed. Rows that only match by title, multi-word queries and edits mid-text are never completed.
-- `↓` / `↑` move through the rows and put the selected URL into the address bar; stepping past the end restores what you typed. `Enter` opens the selected row, or, with nothing selected, resolves the typed text as usual (URL, host, or DuckDuckGo search). `Esc` closes the list and restores the typed text; clicking a row opens it.
+- `↓` / `↑` move through the rows and put the selected URL into the address bar; stepping past the end restores what you typed. `Enter` opens the selected row, or, with nothing selected, resolves the typed text as usual (URL, host, or a search with your search engine). `Esc` closes the list and restores the typed text; clicking a row opens it.
 - Hovering a row reveals an **×** at its right edge that forgets the page: it leaves history on disk as well, and the list refills from what you typed.
 
 History lives in `~/Library/Application Support/Felifox/history/visits.tsv`, one tab-separated line per URL (last visit as unix seconds, visit count, URL, title), newest first, with site icons beside it in `history/icons/`. Delete the folder to clear both. The GPUI Home page, `about:` pages and failed loads are not recorded; the file is capped at 10 000 pages, dropping the least recently visited.
@@ -273,7 +273,9 @@ Limitations: there is no pause or resume, no "ask where to save", no per-site fo
 
 ## Artwork and appearance
 
-The toolbar's **Theme ▾** button opens six curated palettes: **Milky Way** (the new-profile default), Midnight Party, Confetti Sunset, Neon Wool, Alpine Pop, and Forest Carnival. Existing saved selections keep their original theme keys. Themes recolor Felinaut's chrome, address field, New Tab page and About window—not websites. Theme, animation and address-bar choices are saved to `~/Library/Application Support/Felifox/settings` (`key=value` lines, including sidebar choices) and restored on launch.
+The toolbar's **Theme ▾** button opens six curated palettes: **Milky Way** (the new-profile default), Midnight Party, Confetti Sunset, Neon Wool, Alpine Pop, and Forest Carnival. Existing saved selections keep their original theme keys. Themes recolor Felinaut's chrome, address field, New Tab page and About window—not websites. Theme, animation and address-bar choices are saved to `~/Library/Application Support/Felifox/settings` (`key=value` lines, including sidebar choices and `search=` for the search engine) and restored on launch.
+
+Address-bar searches use **DuckDuckGo** by default. The other choices are **Google**, **Bing**, **Brave Search**, **Ecosia** and **Startpage**; the choice is saved as `search=duckduckgo|google|bing|brave|ecosia|startpage`. The list is fixed: only the encoded query varies, so a saved value cannot send searches to any other site. A missing, unknown or edited value falls back to DuckDuckGo, and older settings files keep working.
 
 - **Original embedded SVG artwork:** a happy orange-and-cream astronaut cat exploring colorful yarn planets, a simplified helmet symbol, and a floating cardboard exploration box on New Tab. She has one clear smile, a cyan bubble visor, and a white/lavender suit. No fox emoji, external assets or large background bitmaps.
 - **Six distinct procedural scenes:** Milky Way has layered galactic nebulae, subtle stars, moons and cross-wound yarn planets. All themes share restrained orbital threads and wool-planet discoveries; Midnight Party has tumbling confetti, streamers, golden stars and neon ribbons; Confetti Sunset has a golden sun, peach/coral hills and falling confetti; Alpine Pop has snowcapped ice mountains, glacier facets, drifting snow and ridge glints; Neon Wool has rolling yarn balls and flowing loose threads; Forest Carnival has swaying foliage, citrus, cherries, flowers and fluttering petals.
@@ -301,7 +303,7 @@ The previous WebRender/SWGL pipeline, HTML extraction, custom HTTP loader and `-
 
 ## Scope and limitations
 
-Keep it small: no bookmarks manager, extensions, permission UI, tracker-blocker promise, or private-mode promise. Felinaut persists browsing history and site icons (`~/Library/Application Support/Felifox/history/`, delete it to clear them), Appearance choices (`…/Felifox/settings`), saved tabs (`…/Felifox/tabs.tsv`), live folders (`…/Felifox/live.tsv`) and the downloads list (`…/Felifox/downloads.tsv`: state, start time, size, source host and file path of at most 200 downloads, never the download URL; delete it to clear the list, the files stay). Volume choices last for the session only. WebKit's normal website storage is enabled; cookies and local storage may persist independently of the in-memory tab list.
+Keep it small: no bookmarks manager, extensions, permission UI, tracker-blocker promise, or private-mode promise. Felinaut persists browsing history and site icons (`~/Library/Application Support/Felifox/history/`, delete it to clear them), Appearance and search engine choices (`…/Felifox/settings`), saved tabs (`…/Felifox/tabs.tsv`), live folders (`…/Felifox/live.tsv`) and the downloads list (`…/Felifox/downloads.tsv`: state, start time, size, source host and file path of at most 200 downloads, never the download URL; delete it to clear the list, the files stay). Volume choices last for the session only. WebKit's normal website storage is enabled; cookies and local storage may persist independently of the in-memory tab list.
 
 - Compatibility is **WebKit compatibility**, not Chromium compatibility. Websites requiring specific browser integrations, DRM, permissions, or custom URL schemes may still fail.
 - Top-level navigation permits HTTP(S) and `about:` pages; file, data, JavaScript and external-app schemes are blocked. This is not a general request filter: WebKit manages subresources and web APIs.
