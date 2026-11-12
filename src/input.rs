@@ -55,6 +55,8 @@ pub enum AddressEvent {
     Up,
     Down,
     Escape,
+    /// The zoom level was clicked.
+    ResetZoom,
 }
 
 /// Register editing shortcuts scoped to the address input's key context.
@@ -96,6 +98,7 @@ pub struct AddressInput {
     focus_handle: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
+    zoom: Option<(SharedString, f32)>,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -116,6 +119,7 @@ impl AddressInput {
             focus_handle: cx.focus_handle(),
             content: "".into(),
             placeholder: "Search or enter an address".into(),
+            zoom: None,
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -139,6 +143,10 @@ impl AddressInput {
         self.last_bounds = None;
         self.is_selecting = false;
         cx.notify();
+    }
+
+    pub fn set_zoom(&mut self, zoom: Option<(SharedString, f32)>) {
+        self.zoom = zoom;
     }
 
     pub fn text(&self) -> &str {
@@ -881,6 +889,15 @@ impl Render for AddressInput {
             .py(px(4.))
             .overflow_hidden()
             .child(TextElement { input: cx.entity() })
+            .children(self.zoom.clone().map(|(zoom, flash)| {
+                zoom_badge(p, zoom, flash).ml_2().on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_, _, _, cx| {
+                        cx.stop_propagation();
+                        cx.emit(AddressEvent::ResetZoom);
+                    }),
+                )
+            }))
     }
 }
 
@@ -888,6 +905,32 @@ impl Focusable for AddressInput {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
+}
+
+/// The page's zoom level at the end of the address bar; clicking it resets the zoom.
+/// `flash` runs from 0, filled with the accent color, to 1, plain.
+pub fn zoom_badge(p: theme::Palette, zoom: SharedString, flash: f32) -> gpui::Div {
+    let (accent, text) = (rgb(p.primary), rgb(p.text));
+    div()
+        .flex_shrink_0()
+        .map(|mut badge| {
+            badge.style().align_self = Some(gpui::AlignSelf::Center);
+            badge
+        })
+        .px_1p5()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(p.border))
+        .bg(gpui::Rgba {
+            a: 1. - flash,
+            ..accent
+        })
+        .text_size(px(11.))
+        .line_height(px(16.))
+        .text_color(if flash < 0.5 { rgb(p.background) } else { text })
+        .cursor_pointer()
+        .hover(move |s| s.border_color(accent))
+        .child(zoom)
 }
 
 #[cfg(test)]

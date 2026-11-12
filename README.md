@@ -150,6 +150,7 @@ FELINAUT_NOTARY_PROFILE=felinaut-notary cargo dist
 | `⌘⇧T`            | Reopen the last closed tab (back in its split view if possible) |
 | `⌘L`             | Focus address and select all                                    |
 | `⌘R`             | Reload                                                          |
+| `⌘+` / `⌘-`      | Zoom in / out; the address bar shows the level, click it to reset |
 | `⌘[` / `⌘]`      | Back / forward                                                  |
 | `⌘⇧H`            | Home                                                            |
 | `⌘⇧M`            | Mute / unmute active tab                                        |
