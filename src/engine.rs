@@ -5,8 +5,68 @@ use url::Url;
 const MAX_URL_CHARS: usize = 8_192;
 const NEW_TAB: &str = "felinaut://newtab";
 
-/// Resolve address-bar input to a web URL, the internal new tab, or a search.
-pub fn resolve_input(input: &str) -> Result<String, String> {
+/// Where address-bar searches go. A fixed list: the query is the only thing
+/// that varies, so a saved setting can never point searches at an arbitrary site.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SearchEngine {
+    #[default]
+    DuckDuckGo,
+    Google,
+    Bing,
+    Brave,
+    Ecosia,
+    Startpage,
+}
+
+impl SearchEngine {
+    pub const ALL: [Self; 6] = [
+        Self::DuckDuckGo,
+        Self::Google,
+        Self::Bing,
+        Self::Brave,
+        Self::Ecosia,
+        Self::Startpage,
+    ];
+
+    /// The persisted identifier, independent of the display name.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::DuckDuckGo => "duckduckgo",
+            Self::Google => "google",
+            Self::Bing => "bing",
+            Self::Brave => "brave",
+            Self::Ecosia => "ecosia",
+            Self::Startpage => "startpage",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|engine| engine.key() == key)
+    }
+
+    /// The results page and the name of its query parameter.
+    fn endpoint(self) -> (&'static str, &'static str) {
+        match self {
+            Self::DuckDuckGo => ("https://duckduckgo.com/", "q"),
+            Self::Google => ("https://www.google.com/search", "q"),
+            Self::Bing => ("https://www.bing.com/search", "q"),
+            Self::Brave => ("https://search.brave.com/search", "q"),
+            Self::Ecosia => ("https://www.ecosia.org/search", "q"),
+            Self::Startpage => ("https://www.startpage.com/sp/search", "query"),
+        }
+    }
+
+    /// The results page for `query`, with the query encoded as its only parameter.
+    pub fn search_url(self, query: &str) -> Result<String, String> {
+        let (base, parameter) = self.endpoint();
+        let mut url = Url::parse(base).map_err(|e| e.to_string())?;
+        url.query_pairs_mut().append_pair(parameter, query);
+        Ok(url.into())
+    }
+}
+
+/// Resolve address-bar input to a web URL, the internal new tab, or a search with `engine`.
+pub fn resolve_input(input: &str, engine: SearchEngine) -> Result<String, String> {
     let input = input.trim();
     if input.is_empty() {
         return Err("Enter an address or search query.".into());
@@ -32,9 +92,7 @@ pub fn resolve_input(input: &str) -> Result<String, String> {
         return web_url(input).map(|url| url.to_string());
     }
 
-    let mut search = Url::parse("https://duckduckgo.com/").map_err(|e| e.to_string())?;
-    search.query_pairs_mut().append_pair("q", input);
-    Ok(search.into())
+    engine.search_url(input)
 }
 
 fn web_url(input: &str) -> Result<Url, String> {
@@ -102,7 +160,9 @@ mod tests {
             ("127.0.0.1:8080", "https://127.0.0.1:8080/"),
             ("[::1]:8080", "https://[::1]:8080/"),
         ] {
-            assert_eq!(resolve_input(input).unwrap(), expected, "{input}");
+            for engine in SearchEngine::ALL {
+                assert_eq!(resolve_input(input, engine).unwrap(), expected, "{input}");
+            }
         }
     }
 
@@ -113,7 +173,7 @@ mod tests {
             "cats & dogs #cute + café",
             "why example.com fails",
         ] {
-            let url = Url::parse(&resolve_input(query).unwrap()).unwrap();
+            let url = Url::parse(&resolve_input(query, SearchEngine::default()).unwrap()).unwrap();
             assert_eq!(url.host_str(), Some("duckduckgo.com"));
             assert_eq!(
                 url.query_pairs().collect::<Vec<_>>(),
@@ -142,7 +202,77 @@ mod tests {
             "https://example.com:bad",
             "https://example.com/a b",
         ] {
-            assert!(resolve_input(input).is_err(), "{input}");
+            for engine in SearchEngine::ALL {
+                assert!(resolve_input(input, engine).is_err(), "{input}");
+            }
+        }
+    }
+
+    #[test]
+    fn duckduckgo_stays_the_default_search_engine() {
+        assert_eq!(SearchEngine::default(), SearchEngine::DuckDuckGo);
+        assert_eq!(
+            resolve_input("cats", SearchEngine::default()).unwrap(),
+            "https://duckduckgo.com/?q=cats"
+        );
+    }
+
+    #[test]
+    fn every_search_engine_gets_only_the_encoded_query() {
+        let expected = [
+            (SearchEngine::DuckDuckGo, "duckduckgo.com", "/", "q"),
+            (SearchEngine::Google, "www.google.com", "/search", "q"),
+            (SearchEngine::Bing, "www.bing.com", "/search", "q"),
+            (SearchEngine::Brave, "search.brave.com", "/search", "q"),
+            (SearchEngine::Ecosia, "www.ecosia.org", "/search", "q"),
+            (
+                SearchEngine::Startpage,
+                "www.startpage.com",
+                "/sp/search",
+                "query",
+            ),
+        ];
+        assert_eq!(SearchEngine::ALL.len(), expected.len());
+        for (engine, host, path, parameter) in expected {
+            for query in [
+                "rust browser",
+                "cats & dogs #cute + café",
+                "a=b&q=evil",
+                "?",
+            ] {
+                let url = Url::parse(&resolve_input(query, engine).unwrap()).unwrap();
+                assert_eq!(url.scheme(), "https", "{engine:?}");
+                assert_eq!(url.host_str(), Some(host), "{engine:?}");
+                assert_eq!(url.path(), path, "{engine:?}");
+                assert_eq!(url.fragment(), None, "{engine:?}");
+                assert_eq!(
+                    url.query_pairs().collect::<Vec<_>>(),
+                    vec![(parameter.into(), query.into())],
+                    "{engine:?} {query}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn search_engine_keys_round_trip_and_reject_unknown_values() {
+        let mut keys = Vec::new();
+        for engine in SearchEngine::ALL {
+            assert_eq!(SearchEngine::from_key(engine.key()), Some(engine));
+            keys.push(engine.key());
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), SearchEngine::ALL.len(), "keys must be unique");
+        for key in [
+            "",
+            "DuckDuckGo",
+            "Google",
+            " google",
+            "yahoo",
+            "https://evil.example/?q=",
+        ] {
+            assert_eq!(SearchEngine::from_key(key), None, "{key:?}");
         }
     }
 }
