@@ -2048,8 +2048,6 @@ impl Browser {
     fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         self.close_tab_at(self.active, window, cx);
     }
-    /// Reopens the most recently closed tab where it was, back in its split view when the
-    /// other half is still open and free.
     /// ⌘⇧C: copy the page address without tracking parameters (see `clean_link`), then
     /// confirm it in a small pop-up under the toolbar.
     fn copy_clean_link(&mut self, _: &CopyCleanLink, window: &mut Window, cx: &mut Context<Self>) {
@@ -2061,6 +2059,8 @@ impl Browser {
         }
         link_toast::show(copied, window, self.sidebar_width(cx), CHROME_ROW, cx);
     }
+    /// Reopens the most recently closed tab where it was, back in its split view when the
+    /// other half is still open and free.
     fn reopen_tab(&mut self, _: &ReopenTab, window: &mut Window, cx: &mut Context<Self>) {
         let Some(closed) = self.closed.pop() else {
             return;
