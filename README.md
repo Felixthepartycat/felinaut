@@ -147,6 +147,8 @@ Pages see Felinaut as the Safari installed on the Mac, which uses the same syste
 
 **What doesn't change:** Safari-only features such as Apple Pay and passkeys still need Apple's entitlements (see Passkeys below). Sites may offer them and then find them unavailable. The code is in `src/identity.rs`.
 
+**Embedded-browser checks are bypassed too.** Some sign-in flows, Google's among them, deliberately look for embedded web views and refuse or reroute them. Felinaut no longer looks like one, so those flows now run in a setup the site does not officially support: they may work, or break in ways the site does not expect.
+
 ## Passkeys
 
 **Today:** passwords, one-time codes and every other sign-in that runs inside the page work. Passkeys do not: WebKit refuses WebAuthn in an embedded `WKWebView` unless the app carries Apple's restricted browser entitlement. Measured in a dev-signed Felinaut build on macOS 26: `navigator.credentials` and `PublicKeyCredential` exist on https://webauthn.io, but `isUserVerifyingPlatformAuthenticatorAvailable()` returns `false` and both `create()` and `get()` reject immediately with `NotAllowedError: The request is not allowed by the user agent or the platform in the current context`. No passkey sheet appears. There is no JavaScript workaround: the passkey UI and the iCloud Keychain access belong to WebKit's own process.
