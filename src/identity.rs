@@ -15,12 +15,14 @@ const WEBKIT: &str =
 const SAFARI_TOKEN: &str = "605.1.15";
 const SAFARI_INFO: &str = "/Applications/Safari.app/Contents/Info.plist";
 
-/// The user agent for `version` (`major.minor`).
+/// The user agent for `version` (`major.minor`, plus `.patch` when Safari has one).
 pub fn user_agent_for(version: &str) -> String {
     format!("{WEBKIT} Version/{version} Safari/{SAFARI_TOKEN}")
 }
 
-/// Safari's `major.minor` from its XML `Info.plist`, or `None` if it is missing or malformed.
+/// Safari's version from its XML `Info.plist` as Safari itself reports it: `major.minor`, plus
+/// `.patch` when there is one (Safari 26.6.2 sends `Version/26.6.2`). `None` if it is missing or
+/// malformed.
 pub fn safari_version(info_plist: &str) -> Option<String> {
     let after_key = info_plist
         .split("<key>CFBundleShortVersionString</key>")
@@ -34,15 +36,23 @@ pub fn safari_version(info_plist: &str) -> Option<String> {
     let mut parts = value.split('.');
     let major = parts.next()?;
     let minor = parts.next().unwrap_or("0");
+    let patch = parts.next();
     let number =
         |part: &str| (1..=3).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_digit());
-    (number(major) && number(minor) && parts.all(number)).then(|| format!("{major}.{minor}"))
+    let valid = number(major) && number(minor) && patch.is_none_or(number) && parts.all(number);
+    valid.then(|| match patch {
+        Some(patch) => format!("{major}.{minor}.{patch}"),
+        None => format!("{major}.{minor}"),
+    })
 }
 
 /// Safari's version for a macOS version, for when the installed Safari cannot be read. They
-/// are the same from macOS 26 on, and Safari was three ahead from macOS 11 to 15.
-pub fn version_for_macos(major: isize, minor: isize) -> String {
-    if major >= 26 {
+/// are the same from macOS 26 on, and Safari was three ahead from macOS 11 to 15. Either way it
+/// is approximate: Safari can be updated apart from macOS.
+pub fn version_for_macos(major: isize, minor: isize, patch: isize) -> String {
+    if major >= 26 && patch > 0 {
+        format!("{major}.{minor}.{patch}")
+    } else if major >= 26 {
         format!("{major}.{minor}")
     } else {
         format!("{}.0", major + 3)
@@ -58,7 +68,7 @@ pub fn user_agent() -> &'static str {
             .and_then(|plist| safari_version(&plist))
             .unwrap_or_else(|| {
                 let os = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
-                version_for_macos(os.majorVersion, os.minorVersion)
+                version_for_macos(os.majorVersion, os.minorVersion, os.patchVersion)
             });
         user_agent_for(&version)
     })
@@ -92,13 +102,18 @@ mod tests {
     }
 
     #[test]
-    fn reads_major_and_minor_from_safaris_info_plist() {
+    fn reads_the_version_safari_reports_from_its_info_plist() {
+        // Safari sends the patch level when there is one: Safari 26.6.2 reports
+        // `Version/26.6.2`, Safari 26.6 reports `Version/26.6`.
         for (version, expected) in [
-            ("26.6.2", "26.6"),
+            ("26.6.2", "26.6.2"),
             ("26.6", "26.6"),
-            ("18.3.1", "18.3"),
+            ("18.3.1", "18.3.1"),
+            ("26.0.1", "26.0.1"),
             ("26", "26.0"),
             (" 26.1 ", "26.1"),
+            // Anything after the patch is a build detail that Safari does not report.
+            ("26.6.2.1", "26.6.2"),
         ] {
             assert_eq!(
                 safari_version(&plist(version)).as_deref(),
@@ -115,6 +130,8 @@ mod tests {
             "beta",
             "26.x",
             "26..1",
+            "26.6.",
+            "26.6.x",
             ".6",
             "26.6 beta",
             "26.6.2.1.9-rc",
@@ -135,14 +152,16 @@ mod tests {
 
     #[test]
     fn an_unreadable_safari_falls_back_to_the_version_for_this_macos() {
-        for ((major, minor), expected) in [
-            ((26, 0), "26.0"),
-            ((26, 6), "26.6"),
-            ((27, 1), "27.1"),
-            ((15, 6), "18.0"),
-            ((11, 0), "14.0"),
+        for ((major, minor, patch), expected) in [
+            ((26, 0, 0), "26.0"),
+            ((26, 0, 1), "26.0.1"),
+            ((26, 6, 0), "26.6"),
+            ((26, 6, 2), "26.6.2"),
+            ((27, 1, 0), "27.1"),
+            ((15, 6, 1), "18.0"),
+            ((11, 0, 0), "14.0"),
         ] {
-            assert_eq!(version_for_macos(major, minor), expected);
+            assert_eq!(version_for_macos(major, minor, patch), expected);
         }
     }
 
@@ -154,9 +173,9 @@ mod tests {
             .strip_prefix(&format!("{WEBKIT} Version/"))
             .and_then(|rest| rest.strip_suffix(&format!(" Safari/{SAFARI_TOKEN}")))
             .expect("Safari-shaped user agent");
-        let (major, minor) = version.split_once('.').expect("major.minor");
+        let parts: Vec<_> = version.split('.').collect();
         assert!(
-            major.parse::<u16>().is_ok() && minor.parse::<u16>().is_ok(),
+            (2..=3).contains(&parts.len()) && parts.iter().all(|part| part.parse::<u16>().is_ok()),
             "{version}"
         );
         assert!(std::ptr::eq(agent, user_agent()), "read once and shared");
