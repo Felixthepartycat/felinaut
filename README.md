@@ -202,18 +202,22 @@ FELINAUT_NOTARY_PROFILE=felinaut-notary cargo dist
 `⌘⇧C` (or **Edit → Copy Clean Link**) copies the active page's address without tracking. A small pop-up under the toolbar confirms it ("Link copied · Tracking removed", or "No tracking found"). It disappears after about 1.5 seconds, never takes keyboard focus, and lets clicks through to the page.
 
 **Removed everywhere:**
-- Campaign parameters: `utm_*`, `pk_*`, `mtm_*` and `hsa_*`.
+- Campaign parameters: `utm_*`, `mtm_*`, `hsa_*` and Matomo's `pk_campaign`, `pk_kwd`, `pk_source` and similar (listed exactly, because sites use other `pk_` names for themselves).
 - Ad click IDs such as `fbclid`, `gclid`, `msclkid`, `ttclid` and `twclid`.
 - Email and analytics IDs such as `mc_eid`, `_hsenc` and `_ga`.
 - Text-highlight fragments (`#:~:text=…`).
 
 **Removed only where they track:**
-- **YouTube:** `si`, `feature` and `pp`.
+- **YouTube** (including `m.` and `music.`): `si`, `feature` and `pp`.
 - **Spotify:** `si`.
 - **Google search pages:** `ved`, `ei`, `sei`, `oq` and similar.
-- **Amazon:** `ref` paths and parameters, `pd_rd_*`, `pf_rd_*`, `qid` and `sr`.
+- **Amazon** (any of its hosts, such as `www.`, `m.` and `smile.`): `ref` paths and parameters, `pd_rd_*`, `pf_rd_*`, `qid` and `sr`.
+
+Google and Amazon rules apply only on their own domains, which are listed explicitly (`google.de`, `google.co.uk`, `amazon.fr`, `amazon.com.br` and so on), so `amazon.github.io` or `google.example.io` are left alone.
 
 Everything else stays in its original order and encoding, so the link opens the same page. For example, GitHub's `?ref=main` is kept. New Tab and other non-web pages have no link to copy. The rules are in `src/clean_link.rs`.
+
+**Not covered:** query strings inside hash routes (`#/page?utm_source=…`) are kept, Google's `/url?q=…` redirect links are not unwrapped, and while a page is still loading ⌘⇧C copies the address from before any redirect.
 
 ### Title-first address bar and history suggestions
 
