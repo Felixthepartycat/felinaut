@@ -5,6 +5,8 @@
 //! stripped-down legacy results page without its Sign in button. Felinaut renders with the
 //! system WebKit that the installed Safari also uses, so it reports that Safari's version.
 
+use std::io::Read;
+use std::path::Path;
 use std::sync::OnceLock;
 
 /// WebKit's own user agent on macOS. Apple froze the OS and WebKit tokens for privacy, so they
@@ -14,6 +16,8 @@ const WEBKIT: &str =
 /// Safari's own build token, frozen the same way.
 const SAFARI_TOKEN: &str = "605.1.15";
 const SAFARI_INFO: &str = "/Applications/Safari.app/Contents/Info.plist";
+/// Safari's `Info.plist` is about 22 KB; a much larger file is not one to parse.
+const MAX_INFO_BYTES: u64 = 256 * 1024;
 
 /// The user agent for `version` (`major.minor`, plus `.patch` when Safari has one).
 pub fn user_agent_for(version: &str) -> String {
@@ -59,12 +63,23 @@ pub fn version_for_macos(major: isize, minor: isize, patch: isize) -> String {
     }
 }
 
-/// The user agent every Felinaut page uses. Reads Safari's version once, on first use.
+/// The text of `path`, or `None` if it cannot be read, is not UTF-8 or is over `MAX_INFO_BYTES`.
+fn read_info(path: &Path) -> Option<String> {
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_INFO_BYTES + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    (text.len() as u64 <= MAX_INFO_BYTES).then_some(text)
+}
+
+/// The user agent every Felinaut page uses. Reads Safari's version once, on first use; `main`
+/// calls this before the first window opens so no page creation waits on the disk.
 pub fn user_agent() -> &'static str {
     static AGENT: OnceLock<String> = OnceLock::new();
     AGENT.get_or_init(|| {
-        let version = std::fs::read_to_string(SAFARI_INFO)
-            .ok()
+        let version = read_info(Path::new(SAFARI_INFO))
             .and_then(|plist| safari_version(&plist))
             .unwrap_or_else(|| {
                 let os = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
@@ -163,6 +178,29 @@ mod tests {
         ] {
             assert_eq!(version_for_macos(major, minor, patch), expected);
         }
+    }
+
+    #[test]
+    fn reads_info_files_only_up_to_the_size_limit() {
+        let dir = std::env::temp_dir().join(format!("felinaut-identity-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let small = dir.join("small.plist");
+        std::fs::write(&small, plist("26.6.2")).unwrap();
+        assert_eq!(read_info(&small), Some(plist("26.6.2")));
+        let limit = dir.join("limit.plist");
+        std::fs::write(&limit, "a".repeat(MAX_INFO_BYTES as usize)).unwrap();
+        assert_eq!(
+            read_info(&limit).map(|text| text.len() as u64),
+            Some(MAX_INFO_BYTES)
+        );
+        let large = dir.join("large.plist");
+        std::fs::write(&large, "a".repeat(MAX_INFO_BYTES as usize + 1)).unwrap();
+        assert_eq!(read_info(&large), None);
+        let binary = dir.join("binary.plist");
+        std::fs::write(&binary, b"bplist00\xff\xfe").unwrap();
+        assert_eq!(read_info(&binary), None);
+        assert_eq!(read_info(&dir.join("missing.plist")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
