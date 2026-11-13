@@ -199,7 +199,7 @@ FELINAUT_NOTARY_PROFILE=felinaut-notary cargo dist
 
 ### Copy Clean Link
 
-`⌘⇧C` (or **Edit → Copy Clean Link**) copies the active page's address without tracking. A small pop-up under the toolbar confirms it ("Link copied · Tracking removed", or "No tracking found"). It disappears after about 1.5 seconds, never takes keyboard focus, and lets clicks through to the page.
+`⌘⇧C` (or **Edit → Copy Clean Link**) copies the active page's address without tracking. A small pop-up under the toolbar confirms it ("Link copied · Tracking removed" only when something was actually removed, otherwise "No tracking found", and then the address is copied exactly as it was). It disappears after about 1.5 seconds, never takes keyboard focus, and lets clicks through to the page.
 
 **Removed everywhere:**
 - Campaign parameters: `utm_*`, `mtm_*`, `hsa_*` and Matomo's `pk_campaign`, `pk_kwd`, `pk_source` and similar (listed exactly, because sites use other `pk_` names for themselves).

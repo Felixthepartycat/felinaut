@@ -2055,9 +2055,9 @@ impl Browser {
     fn copy_clean_link(&mut self, _: &CopyCleanLink, window: &mut Window, cx: &mut Context<Self>) {
         let tab = &self.tabs[self.active];
         let link = (!tab.home).then(|| clean_link::clean(&tab.url)).flatten();
-        let copied = link_toast::Copied::from(&tab.url, link.as_deref());
+        let copied = link_toast::Copied::from(link.as_ref());
         if let Some(link) = link {
-            cx.write_to_clipboard(ClipboardItem::new_string(link));
+            cx.write_to_clipboard(ClipboardItem::new_string(link.link));
         }
         link_toast::show(copied, window, self.sidebar_width(cx), CHROME_ROW, cx);
     }

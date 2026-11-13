@@ -9,6 +9,7 @@ use gpui::{
     WindowBounds, WindowHandle, WindowKind, WindowOptions, div, point, prelude::*, px, rgb, size,
 };
 
+use crate::clean_link::CleanLink;
 use crate::theme::{self, ThemeSettings};
 
 /// How long the pop-up stays.
@@ -33,14 +34,12 @@ pub enum Copied {
 }
 
 impl Copied {
-    /// Compare the page address with the copied link (`None` when nothing was copied).
-    pub fn from(address: &str, link: Option<&str>) -> Self {
+    /// What the pop-up says for a copied link (`None` when nothing was copied).
+    pub fn from(link: Option<&CleanLink>) -> Self {
         match link {
             None => Self::NoLink,
-            Some(link) if url::Url::parse(address).is_ok_and(|url| url.as_str() == link) => {
-                Self::Unchanged
-            }
-            Some(_) => Self::Cleaned,
+            Some(link) if link.removed => Self::Cleaned,
+            Some(_) => Self::Unchanged,
         }
     }
 
@@ -230,24 +229,17 @@ mod tests {
 
     #[test]
     fn says_whether_tracking_was_removed() {
-        assert_eq!(
-            Copied::from(
-                "https://a.example/?utm_source=x",
-                Some("https://a.example/")
-            ),
-            Copied::Cleaned
-        );
-        assert_eq!(
-            Copied::from("https://a.example/?id=1", Some("https://a.example/?id=1")),
-            Copied::Unchanged
-        );
-        // The browser may hold an address URL parsing normalises; that is not "tracking".
-        assert_eq!(
-            Copied::from("https://a.example", Some("https://a.example/")),
-            Copied::Unchanged
-        );
-        assert_eq!(Copied::from("felinaut://newtab", None), Copied::NoLink);
-        assert_eq!(Copied::from("", None), Copied::NoLink);
+        // Driven by what `clean` reports, not by comparing strings: a link that only lost an
+        // empty `?` or `&&` has no tracking removed.
+        let copied = |address: &str| Copied::from(crate::clean_link::clean(address).as_ref());
+        assert_eq!(copied("https://a.example/?utm_source=x"), Copied::Cleaned);
+        assert_eq!(copied("https://a.example/#:~:text=hi"), Copied::Cleaned);
+        assert_eq!(copied("https://a.example/?id=1"), Copied::Unchanged);
+        assert_eq!(copied("https://a.example/path?"), Copied::Unchanged);
+        assert_eq!(copied("https://a.example/?a=1&&b=2"), Copied::Unchanged);
+        assert_eq!(copied("https://a.example"), Copied::Unchanged);
+        assert_eq!(copied("felinaut://newtab"), Copied::NoLink);
+        assert_eq!(copied(""), Copied::NoLink);
         for copied in [Copied::Cleaned, Copied::Unchanged, Copied::NoLink] {
             assert!(!copied.title().is_empty() && !copied.detail().is_empty());
         }

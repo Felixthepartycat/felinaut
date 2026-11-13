@@ -183,15 +183,25 @@ fn is_tracking(host: &str, path: &str, name: &str) -> bool {
         })
 }
 
+/// A copied link, and whether anything was removed to make it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CleanLink {
+    pub link: String,
+    /// Whether tracking was found and removed. When it is `false`, `link` is the address
+    /// exactly as it was given.
+    pub removed: bool,
+}
+
 /// The cleaned link for a web page address, or `None` for anything that is not an
 /// http(s) URL (the New Tab page, an empty tab, malformed input).
-pub fn clean(address: &str) -> Option<String> {
+pub fn clean(address: &str) -> Option<CleanLink> {
     let mut url = Url::parse(address).ok()?;
     if !matches!(url.scheme(), "http" | "https") {
         return None;
     }
     // `www.amazon.com.` is the same site as `www.amazon.com`.
     let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
+    let mut removed = false;
 
     // Amazon also puts its tracking in a trailing `/ref=…` path segment.
     if is_amazon(&host)
@@ -200,13 +210,15 @@ pub fn clean(address: &str) -> Option<String> {
     {
         let path = url.path()[..index].to_owned();
         url.set_path(if path.is_empty() { "/" } else { &path });
+        removed = true;
     }
 
     let path = url.path().to_owned();
     if let Some(query) = url.query() {
-        let kept: Vec<&str> = query
-            .split('&')
-            .filter(|part| !part.is_empty())
+        let parts: Vec<&str> = query.split('&').filter(|part| !part.is_empty()).collect();
+        let kept: Vec<&str> = parts
+            .iter()
+            .copied()
             .filter(|part| {
                 // Decode only to compare the name; the original text is what is kept.
                 let name = form_urlencoded::parse(part.as_bytes())
@@ -216,8 +228,11 @@ pub fn clean(address: &str) -> Option<String> {
                 !is_tracking(&host, &path, &name)
             })
             .collect();
-        let kept = kept.join("&");
-        url.set_query((!kept.is_empty()).then_some(kept.as_str()));
+        if kept.len() < parts.len() {
+            removed = true;
+            let kept = kept.join("&");
+            url.set_query((!kept.is_empty()).then_some(kept.as_str()));
+        }
     }
 
     // Text fragments (`#:~:text=…`) record what was highlighted, not where the page is.
@@ -226,20 +241,36 @@ pub fn clean(address: &str) -> Option<String> {
     {
         let anchor = fragment[..index].to_owned();
         url.set_fragment((!anchor.is_empty()).then_some(anchor.as_str()));
+        removed = true;
     }
-    Some(url.into())
+    let link = if removed {
+        url.into()
+    } else {
+        address.to_owned()
+    };
+    Some(CleanLink { link, removed })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::clean;
+    use super::{CleanLink, clean};
 
+    /// `input` loses its tracking and becomes `expected`.
     fn check(input: &str, expected: &str) {
-        assert_eq!(clean(input).as_deref(), Some(expected), "{input}");
+        let link = CleanLink {
+            link: expected.to_owned(),
+            removed: true,
+        };
+        assert_eq!(clean(input), Some(link), "{input}");
     }
 
+    /// `input` has no tracking, so it is copied exactly as given.
     fn unchanged(input: &str) {
-        check(input, input);
+        let link = CleanLink {
+            link: input.to_owned(),
+            removed: false,
+        };
+        assert_eq!(clean(input), Some(link), "{input}");
     }
 
     #[test]
@@ -324,7 +355,23 @@ mod tests {
             "https://example.com/path?&&utm_source=x&&",
             "https://example.com/path",
         );
-        check("https://example.com/path?", "https://example.com/path");
+    }
+
+    #[test]
+    fn says_nothing_was_removed_when_there_was_no_tracking() {
+        // Empty query parts and a bare `?` are not tracking: the address is copied as it is,
+        // and the pop-up must not claim that tracking was removed.
+        for url in [
+            "https://example.com/path?",
+            "https://example.com/path?a=1&&b=2",
+            "https://example.com/path?a=1&",
+            "https://example.com/path?#top",
+            "https://EXAMPLE.com/Path",
+            "https://www.amazon.com/dp/B000123?th=1",
+            "https://www.google.com/search?q=tea",
+        ] {
+            unchanged(url);
+        }
     }
 
     #[test]
