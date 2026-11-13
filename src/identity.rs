@@ -117,6 +117,18 @@ mod tests {
     }
 
     #[test]
+    fn matches_the_user_agent_measured_in_safari() {
+        // Recorded from Safari 27.0.1 on macOS 27.0.1, whose `Info.plist` has
+        // `CFBundleShortVersionString` 27.0.1: the HTTP header and `navigator.userAgent` agree.
+        let version = safari_version(&plist("27.0.1")).unwrap();
+        assert_eq!(
+            user_agent_for(&version),
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 \
+             (KHTML, like Gecko) Version/27.0.1 Safari/605.1.15"
+        );
+    }
+
+    #[test]
     fn reads_the_version_safari_reports_from_its_info_plist() {
         // Safari sends the patch level when there is one: Safari 26.6.2 reports
         // `Version/26.6.2`, Safari 26.6 reports `Version/26.6`.
