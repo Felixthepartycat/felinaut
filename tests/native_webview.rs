@@ -77,7 +77,8 @@ fn main() {
     let base = format!("http://{}", listener.local_addr().unwrap());
     let download_requests = Arc::new(AtomicUsize::new(0));
     let served_downloads = download_requests.clone();
-    // The User-Agent header of every request, and `navigator.userAgent` as the page reports it.
+    // `(source, user agent)`: the User-Agent header of every request, keyed by its path, and
+    // `navigator.userAgent` as the page reports it.
     let user_agents = Arc::new(Mutex::new(Vec::new()));
     let seen_agents = user_agents.clone();
     std::thread::spawn(move || {
@@ -93,17 +94,23 @@ fn main() {
                 continue;
             };
             let request = String::from_utf8_lossy(&request[..count]);
+            let path = request
+                .strip_prefix("GET ")
+                .and_then(|rest| rest.split(['?', ' ']).next())
+                .unwrap_or("?")
+                .to_string();
             let header = request
                 .lines()
-                .find_map(|line| line.strip_prefix("User-Agent: "));
+                .find_map(|line| line.strip_prefix("User-Agent: "))
+                .map(|agent| (path, agent.to_string()));
             let reported = request
                 .strip_prefix("GET /agent?")
                 .and_then(|rest| rest.split(' ').next())
-                .map(|query| query.replace("%20", " "));
+                .map(|query| ("navigator.userAgent".to_string(), query.replace("%20", " ")));
             seen_agents
                 .lock()
                 .unwrap()
-                .extend(header.map(str::to_string).into_iter().chain(reported));
+                .extend(header.into_iter().chain(reported));
             if request.starts_with("GET /download ") {
                 // The server asks for a name outside the downloads folder.
                 served_downloads.fetch_add(1, Ordering::SeqCst);
@@ -263,13 +270,17 @@ fn main() {
                                     // The visible page's requests, its `navigator.userAgent` and the hidden
                                     // page's request all carry one Safari-compatible User-Agent.
                                     let agents = user_agents.lock().unwrap().clone();
-                                    let agent = &agents[0];
+                                    let agent = identity::user_agent();
                                     let (webkit, safari) = agent.split_once(" Version/").unwrap_or_else(|| panic!("no Safari part: {agent:?}"));
                                     assert!(webkit.starts_with("Mozilla/5.0 (Macintosh; ") && webkit.ends_with(" (KHTML, like Gecko)"), "{agent:?}");
                                     let version = safari.strip_suffix(" Safari/605.1.15").unwrap_or_else(|| panic!("no Safari token: {agent:?}"));
                                     assert!(version.split('.').all(|part| part.parse::<u16>().is_ok()), "{agent:?}");
                                     assert!(!agent.to_lowercase().contains("feli"), "{agent:?}");
-                                    assert!(agents.len() >= 8 && agents.iter().all(|other| other == agent), "{agents:?}");
+                                    let sent = |source: &str| agents.iter().filter(|(from, _)| from == source).count();
+                                    assert!(sent("/first") >= 1, "the visible page's request sent no User-Agent: {agents:?}");
+                                    assert!(sent("navigator.userAgent") >= 1, "the page never reported navigator.userAgent: {agents:?}");
+                                    assert!(sent("/download") >= 2, "expected the visible and the hidden page's downloads: {agents:?}");
+                                    assert!(agents.iter().all(|(_, other)| other == agent), "expected {agent:?} everywhere: {agents:?}");
                                     println!("PASS: WebKit JavaScript, DOM, storage, history, failed-load error event and URL polling, hover status, Cmd-click, middle-click and right-click menu bridge, a download that stays in the downloads folder while a hidden page's is refused, and one Safari-compatible User-Agent for visible and hidden pages");
                                     result.set(true);
                                     cx.update(|window, cx| { window.remove_window(); cx.quit(); }).unwrap();
